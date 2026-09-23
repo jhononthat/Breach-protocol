@@ -19,21 +19,46 @@ import { OperatorDraftScreen, PlayerReadyState } from './components/OperatorDraf
 import { Minimap } from './components/Minimap';
 import { PauseMenu } from './components/PauseMenu';
 import { getSpawnOptions } from './maps/spawnPoints';
+import { RankedSystem, PlayerRankedProfile } from './game/RankedSystem';
+import { SkinManager } from './game/SkinShopData';
+import { RankedBadge } from './components/RankedBadge';
+import { SkinShopModal } from './components/SkinShopModal';
+import { DeltaPackModal } from './components/DeltaPackModal';
+import { CodeRedeemModal } from './components/CodeRedeemModal';
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<BreachProtocolEngine | null>(null);
   const flashOverlayRef = useRef<HTMLDivElement>(null);
 
+  // Economy & Ranked State
+  const [rankedProfile, setRankedProfile] = useState<PlayerRankedProfile>(() => RankedSystem.getProfile());
+  const [deltaPacks, setDeltaPacks] = useState<number>(() => SkinManager.getDeltaPackCount());
+  const [gameMode, setGameMode] = useState<'quick' | 'ranked'>('quick');
+  const [isRoomHost, setIsRoomHost] = useState<boolean>(true);
+  const [showSkinShop, setShowSkinShop] = useState<boolean>(false);
+  const [showDeltaPacks, setShowDeltaPacks] = useState<boolean>(false);
+  const [showCodeRedeem, setShowCodeRedeem] = useState<boolean>(false);
+  const [matchRewards, setMatchRewards] = useState<{
+    rpDelta: number;
+    renownDelta: number;
+    breakdown: { label: string; amount: number }[];
+    packDropped?: boolean;
+  } | null>(null);
+
   // Menu State
   const [playerName, setPlayerName] = useState<string>(() => 'Operator_' + Math.floor(100 + Math.random() * 900));
   const [roomId, setRoomId] = useState<string>('LAN_SQUAD_01');
   const [selectedMapKey, setSelectedMapKey] = useState<string>('suburban_house');
   const [selectedSpawnIndex, setSelectedSpawnIndex] = useState<number>(0);
-  const [roundsToWin, setRoundsToWin] = useState<number>(4);
+  const roundsToWin = 4; // Fixed competitive standard: First to 4 rounds (side swap at 3 points)
   const [difficulty, setDifficulty] = useState<string>('Normal');
-  const [selectedOp, setSelectedOp] = useState<OperatorDef>(OPERATORS[0]);
-  const [selectedWeaponIdx, setSelectedWeaponIdx] = useState<number>(0);
+  const [selectedOp, setSelectedOp] = useState<OperatorDef>(() => {
+    const randomSide = Math.random() < 0.5 ? 'atk' : 'def';
+    const sideOps = OPERATORS.filter(o => o.side === randomSide);
+    return sideOps[Math.floor(Math.random() * sideOps.length)] || OPERATORS[0];
+  });
+  const [selectedWeaponIdx, setSelectedWeaponIdx] = useState<number>(() => getRecommendedWeaponIndex(selectedOp));
   const [opSideFilter, setOpSideFilter] = useState<'all' | 'atk' | 'def'>('all');
   const [lanStatus, setLanStatus] = useState<string>('Ready for LAN');
   const [peerCount, setPeerCount] = useState<number>(0);
@@ -98,6 +123,9 @@ export default function App() {
     defuserTimer: 45.0,
     canPlantDefuser: false,
     canDefuse: false,
+    canReinforce: false,
+    reinforcementsLeft: 2,
+    reinforceProgress: 0,
     diagOn: false,
     diagInfo: '',
     atkHumans: 1,
@@ -190,6 +218,11 @@ export default function App() {
       ).join('\n');
     }
 
+    const nearbySoftWall = eng.barricades.find(
+      b => !b.isBreached && b.isSoftWall && !b.isReinforced && b.position.distanceTo(eng.player.pos) < 2.8
+    );
+    const canReinforce = eng.player.side === 'def' && eng.player.alive && (eng.player.reinforcementsLeft ?? 0) > 0 && !!nearbySoftWall;
+
     setHudState({
       round: eng.match.round,
       scoreAtk: eng.match.scoreAtk,
@@ -228,6 +261,9 @@ export default function App() {
       defuserTimer: eng.match.defuserTimer,
       canPlantDefuser: isNearPlantSite,
       canDefuse: isNearDefuser,
+      canReinforce,
+      reinforcementsLeft: eng.player.reinforcementsLeft ?? 0,
+      reinforceProgress: eng.match.reinforceProgress || 0,
       diagOn: eng.diagPanelOn,
       diagInfo: diag,
       atkHumans: atkHumansCount,
@@ -253,14 +289,37 @@ export default function App() {
     setSelectedSpawnIndex(0);
   };
 
+  const handleRandomizeTeam = () => {
+    // Switch or randomize assigned team
+    const nextSide: 'atk' | 'def' = selectedOp.side === 'atk' ? 'def' : 'atk';
+    const sideOps = OPERATORS.filter(o => o.side === nextSide);
+    const chosenOp = sideOps[Math.floor(Math.random() * sideOps.length)] || OPERATORS[0];
+    setSelectedOp(chosenOp);
+    setSelectedWeaponIdx(getRecommendedWeaponIndex(chosenOp));
+    setSelectedSpawnIndex(0);
+    setOpSideFilter(nextSide);
+    if (networkClient.connected) {
+      networkClient.connect(roomId.trim() || 'default', playerName.trim() || 'Operator', nextSide, chosenOp.id);
+    }
+  };
+
   const handleEnterDraft = () => {
+    // Randomize assigned team (50% Attack / 50% Defense)
+    const randomSide: 'atk' | 'def' = Math.random() < 0.5 ? 'atk' : 'def';
+    const sideOps = OPERATORS.filter(o => o.side === randomSide);
+    const chosenOp = sideOps[Math.floor(Math.random() * sideOps.length)] || OPERATORS[0];
+    setSelectedOp(chosenOp);
+    setSelectedWeaponIdx(getRecommendedWeaponIndex(chosenOp));
+    setSelectedSpawnIndex(0);
+    setOpSideFilter(randomSide);
+
     setScreenState('draft');
     setIsLocalReady(false);
 
     const cleanRoom = roomId.trim() || 'default';
     const cleanName = playerName.trim() || 'Operator';
     setLanStatus('Connecting to LAN...');
-    networkClient.connect(cleanRoom, cleanName, selectedOp.side, selectedOp.id);
+    networkClient.connect(cleanRoom, cleanName, randomSide, chosenOp.id);
 
     networkClient.onConnected = () => {
       setLanStatus('LAN Connected');
@@ -268,6 +327,13 @@ export default function App() {
 
     networkClient.onDisconnected = () => {
       setLanStatus('Offline (Local Match)');
+    };
+
+    networkClient.onRoomConfig = (cfg) => {
+      if (cfg.mapKey) setSelectedMapKey(cfg.mapKey);
+      if (cfg.difficulty) setDifficulty(cfg.difficulty);
+      if (cfg.gameMode) setGameMode(cfg.gameMode as any);
+      setIsRoomHost(cfg.isHost);
     };
 
     networkClient.onReadyStatusChanged = (players) => {
@@ -329,6 +395,32 @@ export default function App() {
         setMatchWinner(winner);
         setFinalScore(score);
         setMatchOver(true);
+
+        const won = (winner === 'ATTACK' && eng.player.side === 'atk') || (winner === 'DEFENSE' && eng.player.side === 'def');
+        const kills = eng.player.kills || 0;
+        const playerPoints = eng.player.score || 0;
+        const res = RankedSystem.processMatchResults({
+          isRanked: gameMode === 'ranked',
+          isWin: won,
+          kills,
+          score: playerPoints,
+          isMVP: won && kills >= 2
+        });
+
+        let packDropped = false;
+        if (won && Math.random() < (gameMode === 'ranked' ? 0.45 : 0.20)) {
+          const newCount = SkinManager.addDeltaPacks(1);
+          setDeltaPacks(newCount);
+          packDropped = true;
+        }
+
+        setMatchRewards({
+          rpDelta: res.rpDelta,
+          renownDelta: res.renownDelta,
+          breakdown: res.breakdown,
+          packDropped
+        });
+        setRankedProfile(res.newProfile);
       };
 
       engineRef.current = eng;
@@ -526,28 +618,78 @@ export default function App() {
       {/* Main Menu Screen */}
       {screenState === 'main_menu' && (
         <div id="menu" className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[radial-gradient(ellipse_at_center,#0d1620_0%,#050810_100%)] p-4 overflow-y-auto">
+          {/* Top Economy & Ranked Navigation Header */}
+          <div className="w-full max-w-3xl flex flex-wrap items-center justify-between gap-2 bg-[#0b141d]/90 border border-[#2c5771]/80 rounded-xl px-4 py-2.5 shadow-xl backdrop-blur-md">
+            <RankedBadge rankInfo={RankedSystem.getRankInfo(rankedProfile.totalRP)} />
+
+            <div className="flex items-center gap-2 flex-wrap text-xs font-mono">
+              <div className="px-3 py-1 bg-amber-950/50 border border-amber-500/40 rounded-lg text-amber-300 font-bold flex items-center gap-1.5 shadow-inner">
+                <span>💰</span>
+                <span>{rankedProfile.renown.toLocaleString()} RENOWN</span>
+              </div>
+
+              <button
+                onClick={() => setShowDeltaPacks(true)}
+                className="px-3 py-1 bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/50 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer transition-all shadow-md active:scale-95"
+              >
+                <span>📦</span>
+                <span>DELTA PACKS ({deltaPacks})</span>
+              </button>
+
+              <button
+                onClick={() => setShowSkinShop(true)}
+                className="px-3 py-1 bg-cyan-900/60 hover:bg-cyan-700 text-cyan-200 border border-cyan-500/50 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer transition-all shadow-md active:scale-95"
+              >
+                <span>🏪</span>
+                <span>SKIN SHOP</span>
+              </button>
+
+              <button
+                onClick={() => setShowCodeRedeem(true)}
+                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-gray-200 border border-slate-600 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                title="Enter Secret Code"
+              >
+                <span>🔑</span>
+                <span>CODE</span>
+              </button>
+            </div>
+          </div>
+
           <div className="text-center">
             <h1 className="text-4xl md:text-5xl tracking-[6px] text-[#7fd6ff] font-extrabold drop-shadow-[0_0_20px_rgba(127,214,255,0.6)]">
               BREACH<span className="text-[#ff6b4a]">PROTOCOL</span>
             </h1>
-            <p className="text-xs text-[#a0c4db] tracking-widest uppercase mt-1">Tactical 5v5 Siege · Local LAN Multiplayer & Dynamic AI Bots</p>
+            <p className="text-xs text-[#a0c4db] tracking-widest uppercase mt-1">Tactical 5v5 Siege · Competitive Ranked & Custom LAN Lobbies</p>
           </div>
 
           <div className="bg-[#0f1923]/90 border border-[#7fd6ff]/25 rounded-xl p-5 w-full max-w-3xl shadow-2xl backdrop-blur-md flex flex-col gap-3">
             {/* Online Matchmaking & Lobbies Browser */}
             <MatchmakingBrowser
               selectedRoomId={roomId}
-              onSelectRoom={(id) => setRoomId(id)}
+              onSelectRoom={(id, info) => {
+                setRoomId(id);
+                if (info) {
+                  if (info.mapKey) {
+                    setSelectedMapKey(info.mapKey);
+                    setSelectedSpawnIndex(0);
+                  }
+                  if (info.difficulty) setDifficulty(info.difficulty);
+                  if (info.gameMode) setGameMode(info.gameMode);
+                  setIsRoomHost(false);
+                }
+              }}
               playerName={playerName}
               setPlayerName={(name) => setPlayerName(name)}
+              currentMode={gameMode}
+              onModeChanged={setGameMode}
             />
 
             {/* Codename & Room Config */}
             <div className="bg-[#0b141d]/80 border border-[#2c5771]/60 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-mono font-bold text-[#7fd6ff]">SELECTED MATCH ROOM: <b className="text-[#ffe27a]">{roomId}</b></span>
-                <span className="text-gray-400 font-mono text-[10px]">(AI Bots fill remaining squad slots)</span>
+                <span className="font-mono font-bold text-[#7fd6ff]">SELECTED ROOM: <b className="text-[#ffe27a]">{roomId}</b></span>
+                <span className="text-gray-400 font-mono text-[10px]">(AI Bots fill remaining slots)</span>
               </div>
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
@@ -564,20 +706,41 @@ export default function App() {
                   <input
                     type="text"
                     value={roomId}
-                    onChange={(e) => setRoomId(e.target.value)}
+                    onChange={(e) => {
+                      setRoomId(e.target.value);
+                      setIsRoomHost(true);
+                    }}
                     className="bg-[#132433] text-[#7fd6ff] font-mono font-bold border border-[#2c5771] rounded px-2 py-0.5 text-xs w-32 outline-none"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Map Selection */}
+            {/* Lobby Control Notice */}
+            {!isRoomHost && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-950/40 border border-amber-500/40 rounded-lg text-[11px] text-amber-300 font-mono">
+                <span>🔒</span>
+                <span><b>LOBBY ENFORCED:</b> Map ({selectedMapKey}) and Bot AI ({difficulty}) are chosen by the Lobby Host. Individual players cannot modify these settings.</span>
+              </div>
+            )}
+
+            {/* Map Selection (Host Controlled) */}
             <div className="flex flex-col gap-1 text-xs">
-              <label className="font-semibold text-gray-300">Map</label>
+              <div className="flex justify-between items-center">
+                <label className="font-semibold text-gray-300">Map {isRoomHost ? '(Host Sets For Room)' : '(Locked by Lobby)'}</label>
+                {!isRoomHost && <span className="text-[10px] text-amber-400 font-mono">🔒 Locked by Host</span>}
+              </div>
               <select
-                className="bg-[#132433] text-[#dff] border border-[#2c5771] rounded-md px-3 py-1.5 outline-none cursor-pointer font-mono"
+                disabled={!isRoomHost}
+                className={`bg-[#132433] text-[#dff] border rounded-md px-3 py-1.5 outline-none font-mono ${
+                  !isRoomHost ? 'opacity-60 cursor-not-allowed border-amber-500/40' : 'cursor-pointer border-[#2c5771]'
+                }`}
                 value={selectedMapKey}
-                onChange={(e) => { setSelectedMapKey(e.target.value); setSelectedSpawnIndex(0); }}
+                onChange={(e) => {
+                  setSelectedMapKey(e.target.value);
+                  setSelectedSpawnIndex(0);
+                  networkClient.updateRoomSettings?.(e.target.value, difficulty, gameMode);
+                }}
               >
                 <option value="suburban_house">Suburban Villa (2F House, Warm Interior)</option>
                 <option value="warehouse">Warehouse District (1F Open Industrial, No Rappel)</option>
@@ -600,32 +763,79 @@ export default function App() {
             </div>
 
             {/* Difficulty & Rounds Config */}
-            <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div className="flex flex-col gap-1">
-                <label className="font-semibold text-gray-300">Rounds to Win</label>
+                <label className="font-semibold text-gray-300">Game Mode</label>
                 <select
-                  className="bg-[#132433] text-[#dff] border border-[#2c5771] rounded-md px-3 py-1.5 outline-none cursor-pointer font-mono"
-                  value={roundsToWin}
-                  onChange={(e) => setRoundsToWin(Number(e.target.value))}
+                  disabled={!isRoomHost}
+                  className={`bg-[#132433] text-[#dff] border rounded-md px-3 py-1.5 outline-none font-mono ${
+                    !isRoomHost ? 'opacity-60 cursor-not-allowed border-amber-500/40' : 'cursor-pointer border-[#2c5771]'
+                  }`}
+                  value={gameMode}
+                  onChange={(e) => {
+                    const m = e.target.value as any;
+                    setGameMode(m);
+                    networkClient.updateRoomSettings?.(selectedMapKey, difficulty, m);
+                  }}
                 >
-                  <option value={1}>1 Round (Quick Skirmish)</option>
-                  <option value={2}>2 Rounds (Short Match)</option>
-                  <option value={4}>4 Rounds (Standard Tactical Competitive)</option>
-                  <option value={6}>6 Rounds (Long Siege)</option>
+                  <option value="quick">Quick Match (Casual Renown)</option>
+                  <option value="ranked">Ranked Competitive (Rank RP + High Renown)</option>
                 </select>
               </div>
 
               <div className="flex flex-col gap-1">
-                <label className="font-semibold text-gray-300">AI Bot Difficulty</label>
+                <label className="font-semibold text-gray-300">Bot AI Difficulty {isRoomHost ? '' : '(🔒)'}</label>
                 <select
-                  className="bg-[#132433] text-[#dff] border border-[#2c5771] rounded-md px-3 py-1.5 outline-none cursor-pointer font-mono"
+                  disabled={!isRoomHost}
+                  className={`bg-[#132433] text-[#dff] border rounded-md px-3 py-1.5 outline-none font-mono ${
+                    !isRoomHost ? 'opacity-60 cursor-not-allowed border-amber-500/40' : 'cursor-pointer border-[#2c5771]'
+                  }`}
                   value={difficulty}
-                  onChange={(e) => setDifficulty(e.target.value)}
+                  onChange={(e) => {
+                    setDifficulty(e.target.value);
+                    networkClient.updateRoomSettings?.(selectedMapKey, e.target.value, gameMode);
+                  }}
                 >
-                  <option value="Easy">Easy (Slower reaction, forgiving angles)</option>
-                  <option value="Normal">Normal (Tactical crossfires, peeking)</option>
-                  <option value="Hard">Hard (Aggressive breach defense, fast aim)</option>
+                  <option value="Easy">Easy (Recruits)</option>
+                  <option value="Normal">Normal (Tactical Squad)</option>
+                  <option value="Hard">Hard (Elite Delta Operators)</option>
                 </select>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-gray-300 flex items-center justify-between">
+                  <span>Match Format</span>
+                  <span className="text-[10px] text-emerald-400 font-mono font-semibold">FIXED RULESET</span>
+                </label>
+                <div className="bg-[#0e1c2a] text-gray-300 border border-[#23455a] rounded-md px-3 py-1.5 font-mono text-xs flex items-center justify-between shadow-inner h-[38px]">
+                  <span className="text-cyan-300 font-bold">First to 4 Rounds</span>
+                  <span className="text-gray-400 text-[11px]">Side swap at 3 pts</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Skin Shop Feature Banner on Main Menu */}
+            <div 
+              onClick={() => setShowSkinShop(true)}
+              className="group cursor-pointer bg-gradient-to-r from-[#0c1e2e] via-[#10293d] to-[#1c1335] hover:from-[#132c42] hover:to-[#281b4d] border border-cyan-500/40 hover:border-cyan-400 rounded-lg p-3 flex items-center justify-between transition-all shadow-lg"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-cyan-950/80 border border-cyan-400/60 flex items-center justify-center text-xl shadow-[0_0_12px_rgba(34,211,238,0.3)] group-hover:scale-105 transition-transform">
+                  🏪
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-sm text-cyan-300 font-mono tracking-wide">WEAPON SKIN SHOP & 3D INSPECTOR</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-400/50 font-mono uppercase font-bold">Featured</span>
+                  </div>
+                  <p className="text-[11px] text-gray-300">
+                    Preview & equip Black Ice, Damascus, Carbon Fiber, and Gold camos on 3D tactical weapons.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-cyan-400 font-mono text-xs font-bold group-hover:translate-x-1 transition-transform">
+                <span>OPEN SHOP</span>
+                <span>➔</span>
               </div>
             </div>
 
@@ -634,14 +844,23 @@ export default function App() {
               <b>🎯 OPERATOR SELECTION:</b> You will choose your Operator & Loadout in the Pre-Match Tactical Draft screen before entering the 3D match.
             </div>
 
-            {/* Proceed Button */}
-            <div className="mt-1 flex justify-center">
+            {/* Action Buttons */}
+            <div className="mt-1 flex flex-col sm:flex-row items-stretch justify-center gap-3">
               <button
                 id="startBtn"
                 onClick={handleEnterDraft}
-                className="text-sm font-extrabold px-10 py-3.5 tracking-[2px] bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:brightness-110 text-white rounded-lg shadow-xl active:scale-95 transition-all cursor-pointer font-mono uppercase"
+                className="flex-1 text-sm font-extrabold px-8 py-3.5 tracking-[2px] bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:brightness-110 text-white rounded-lg shadow-xl active:scale-95 transition-all cursor-pointer font-mono uppercase flex items-center justify-center gap-2"
               >
-                PROCEED TO OPERATOR DRAFT
+                <span>⚔️</span>
+                <span>PROCEED TO OPERATOR DRAFT</span>
+              </button>
+
+              <button
+                onClick={() => setShowSkinShop(true)}
+                className="text-sm font-extrabold px-6 py-3.5 tracking-[1.5px] bg-gradient-to-r from-cyan-900 via-blue-900 to-purple-900 hover:brightness-125 text-cyan-200 border border-cyan-400/50 rounded-lg shadow-xl active:scale-95 transition-all cursor-pointer font-mono uppercase flex items-center justify-center gap-2"
+              >
+                <span>🏪</span>
+                <span>SKIN SHOP & 3D ARMORY</span>
               </button>
             </div>
           </div>
@@ -664,6 +883,7 @@ export default function App() {
           onCancelReady={handleCancelReady}
           onBackToMenu={handleReturnToMenu}
           onMatchStart={handleStartGameFromDraft}
+          onRandomizeTeam={handleRandomizeTeam}
         />
       )}
 
@@ -947,6 +1167,26 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Wall Reinforcement Prompt for Defenders */}
+                {hudState.canReinforce && (
+                  <div className="flex flex-col items-center gap-1.5 bg-black/85 border border-cyan-400/90 px-6 py-3 rounded-lg shadow-2xl backdrop-blur-md animate-pulse">
+                    <div className="text-cyan-300 font-mono font-black text-sm tracking-wider flex items-center gap-2">
+                      <span>🛡️ [HOLD F] REINFORCE SOFT WALL</span>
+                      <span className="text-[11px] text-black font-extrabold bg-gradient-to-r from-cyan-400 to-teal-300 px-2 py-0.5 rounded shadow">
+                        {hudState.reinforcementsLeft} LEFT
+                      </span>
+                    </div>
+                    {hudState.reinforceProgress > 0 && (
+                      <div className="w-56 h-2.5 bg-gray-800 rounded-full overflow-hidden border border-cyan-400/40">
+                        <div
+                          className="h-full bg-gradient-to-r from-cyan-600 via-sky-400 to-teal-300 transition-all duration-75"
+                          style={{ width: `${hudState.reinforceProgress}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {hudState.canKickBreach && (
                   <div className="px-4 py-1.5 bg-[#ff3b30]/90 text-white font-extrabold text-sm rounded border border-white shadow-xl animate-pulse">
                     [SPACE] KICK-BREACH WINDOW ENTRY!
@@ -982,15 +1222,6 @@ export default function App() {
 
               {/* Tactical Minimap */}
               {engineRef.current && <Minimap engine={engineRef.current} />}
-
-              {/* Tactical Comms & Killfeed (Top Left) */}
-              <div className="absolute left-5 top-16 text-xs text-[#bcd] max-w-sm space-y-1 pointer-events-none drop-shadow-md">
-                {logMessages.map((msg, idx) => (
-                  <div key={idx} className="bg-black/60 px-2.5 py-1 rounded backdrop-blur-xs border-l-2 border-[#7fd6ff]">
-                    {msg}
-                  </div>
-                ))}
-              </div>
 
               {/* Chat Feed (Middle Left) */}
               {chatMessages.length > 0 && (
@@ -1031,15 +1262,22 @@ export default function App() {
 
               {/* Bottom Left: Health, Ability & Gadget Charges */}
               <div className="absolute left-5 bottom-5 flex flex-col gap-2">
-                {/* Breach Charge Indicator */}
+                {/* Breach Charge / Reinforcements Indicator */}
                 <div className="flex items-center gap-2">
-                  {hudState.hasActiveBreachCharge ? (
-                    <div className="px-3 py-1 bg-gradient-to-r from-[#ff3333] to-[#ff6600] text-white font-black text-xs rounded shadow-lg animate-pulse tracking-wide">
-                      💥 [B] DETONATE BREACH CHARGE!
-                    </div>
+                  {hudState.playerSide === 'atk' ? (
+                    hudState.hasActiveBreachCharge ? (
+                      <div className="px-3 py-1 bg-gradient-to-r from-[#ff3333] to-[#ff6600] text-white font-black text-xs rounded shadow-lg animate-pulse tracking-wide">
+                        💥 [B] DETONATE BREACH CHARGE!
+                      </div>
+                    ) : (
+                      <div className="px-2.5 py-1 bg-black/70 border border-[#4a5568] text-gray-300 font-mono text-xs rounded">
+                        💣 [B] BREACH CHARGES: <span className="text-[#ffe27a] font-bold">{hudState.breachChargesLeft}</span>
+                      </div>
+                    )
                   ) : (
-                    <div className="px-2.5 py-1 bg-black/70 border border-[#4a5568] text-gray-300 font-mono text-xs rounded">
-                      💣 [B] BREACH CHARGES: <span className="text-[#ffe27a] font-bold">{hudState.breachChargesLeft}</span>
+                    <div className="px-2.5 py-1 bg-black/70 border border-cyan-500/50 text-cyan-200 font-mono text-xs rounded flex items-center gap-1.5">
+                      <span>🛡️ [HOLD F] WALL REINFORCEMENTS:</span>
+                      <span className="text-cyan-400 font-bold">{hudState.reinforcementsLeft}</span>
                     </div>
                   )}
                 </div>
@@ -1072,7 +1310,7 @@ export default function App() {
 
               {/* Controls / Pointer Hint */}
               <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[11px] text-[#89a] tracking-wide text-center">
-                Click to lock · WASD move · Hold LMB full auto · V melee · Shift sprint · Space rappel/vault · B breach · C crouch · Q/E lean · R reload · F ability · N loadout · 5 drone · Hold TAB gadgets · O scoreboard · T chat
+                Click to lock · WASD move · Hold LMB full auto · V melee · Shift sprint · Space rappel/vault · B breach · C crouch · Q/E lean · R reload · TAB gadgets (Sledge Hammer, Shields, Traps) · N loadout · 5 drone · O scoreboard · T chat
               </div>
             </>
           )}
@@ -1182,16 +1420,101 @@ export default function App() {
 
           {/* Match Over Modal */}
           {matchOver && (
-            <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center gap-4 z-40 backdrop-blur-md pointer-events-auto">
-              <div className="text-3xl font-extrabold tracking-widest text-[#ffe27a]">MATCH OVER</div>
-              <div className="text-xl text-[#7fd6ff] font-bold">{matchWinner} WINS</div>
-              <div className="text-sm text-gray-300">Final Score: {finalScore}</div>
-              <button
-                className="mt-4 px-6 py-2.5 bg-gradient-to-b from-[#ff6b4a] to-[#c8431f] text-white rounded font-bold hover:brightness-110 cursor-pointer pointer-events-auto shadow-lg"
-                onClick={handleReturnToMenu}
-              >
-                RETURN TO MENU
-              </button>
+            <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center gap-4 z-40 backdrop-blur-md pointer-events-auto p-4">
+              <div className="bg-[#0b141d]/95 border border-[#38bdf8]/40 p-6 rounded-2xl max-w-lg w-full flex flex-col items-center gap-4 shadow-2xl text-center">
+                <div className="flex items-center gap-2">
+                  {gameMode === 'ranked' ? (
+                    <span className="px-3 py-1 bg-purple-950/80 text-purple-300 border border-purple-500/50 rounded-full font-mono text-xs font-bold tracking-wider">
+                      🏆 RANKED COMPETITIVE MATCH
+                    </span>
+                  ) : (
+                    <span className="px-3 py-1 bg-blue-950/80 text-blue-300 border border-blue-500/50 rounded-full font-mono text-xs font-bold tracking-wider">
+                      ⚡ QUICK MATCH
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-4xl font-black tracking-widest text-[#ffe27a]">
+                  MATCH OVER
+                </div>
+                <div className="text-2xl text-[#7fd6ff] font-extrabold">
+                  {matchWinner} WINS
+                </div>
+                <div className="text-sm font-mono text-gray-300">
+                  Final Score: <b className="text-white text-base">{finalScore}</b>
+                </div>
+
+                {/* Ranked & Renown Rewards Panel */}
+                <div className="w-full bg-[#060c14] border border-[#1b3447] rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs font-mono font-bold text-gray-400 tracking-wider">
+                    OPERATOR DEBRIEF & REWARDS
+                  </div>
+
+                  <div className="flex items-center justify-center py-1">
+                    <RankedBadge
+                      rankInfo={RankedSystem.getRankInfo(rankedProfile.totalRP)}
+                      size="lg"
+                    />
+                  </div>
+
+                  {matchRewards && (
+                    <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                      {gameMode === 'ranked' ? (
+                        <div className="p-2.5 rounded-lg bg-[#0e1c2a] border border-[#23455a] flex flex-col">
+                          <span className="text-[10px] text-gray-400">RANK POINTS (RP)</span>
+                          <span className={`text-base font-black ${matchRewards.rpDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {matchRewards.rpDelta >= 0 ? `+${matchRewards.rpDelta}` : matchRewards.rpDelta} RP
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="p-2.5 rounded-lg bg-[#0e1c2a] border border-[#23455a] flex flex-col">
+                          <span className="text-[10px] text-gray-400">MATCH TYPE</span>
+                          <span className="text-xs font-bold text-blue-300">Quick Match (Casual)</span>
+                        </div>
+                      )}
+
+                      <div className="p-2.5 rounded-lg bg-[#0e1c2a] border border-[#23455a] flex flex-col">
+                        <span className="text-[10px] text-gray-400">RENOWN EARNED</span>
+                        <span className="text-base font-black text-amber-300">
+                          +{matchRewards.renownDelta.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {matchRewards?.packDropped && (
+                    <div className="flex items-center justify-center gap-2 p-2 bg-purple-950/60 border border-purple-500/50 rounded-lg text-xs font-mono text-purple-200 font-bold animate-pulse">
+                      <span>🎁</span>
+                      <span>LUCKY DROP: You earned a DELTA PACK!</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-3 w-full">
+                  {deltaPacks > 0 && (
+                    <button
+                      onClick={() => setShowDeltaPacks(true)}
+                      className="px-4 py-2 bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-600 hover:to-indigo-600 text-white font-mono text-xs font-bold rounded-lg shadow-lg cursor-pointer transition-all active:scale-95"
+                    >
+                      📦 OPEN DELTA PACK ({deltaPacks})
+                    </button>
+                  )}
+
+                  <button
+                    onClick={() => setShowSkinShop(true)}
+                    className="px-4 py-2 bg-[#183247] hover:bg-[#204562] text-[#7fd6ff] font-mono text-xs font-bold rounded-lg border border-[#38bdf8]/40 shadow-lg cursor-pointer transition-all active:scale-95"
+                  >
+                    🏪 VISIT SKIN SHOP
+                  </button>
+
+                  <button
+                    className="px-6 py-2 bg-gradient-to-b from-[#ff6b4a] to-[#c8431f] text-white rounded-lg font-bold font-mono text-xs hover:brightness-110 cursor-pointer shadow-lg active:scale-95"
+                    onClick={handleReturnToMenu}
+                  >
+                    RETURN TO MENU
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1216,6 +1539,46 @@ export default function App() {
           )}
         </div>
       )}
+
+      {/* Global Modals for Shop, Delta Packs, Code Redemption */}
+      <SkinShopModal
+        isOpen={showSkinShop}
+        onClose={() => setShowSkinShop(false)}
+        renown={rankedProfile.renown}
+        onRenownUpdated={(newRenown) => {
+          setRankedProfile(RankedSystem.getProfile());
+          setDeltaPacks(SkinManager.getDeltaPackCount());
+          engineRef.current?.reloadViewmodelSkin();
+        }}
+        onOpenDeltaPacks={() => {
+          setShowSkinShop(false);
+          setShowDeltaPacks(true);
+        }}
+        onOpenCodeMenu={() => {
+          setShowSkinShop(false);
+          setShowCodeRedeem(true);
+        }}
+      />
+
+      <DeltaPackModal
+        isOpen={showDeltaPacks}
+        onClose={() => setShowDeltaPacks(false)}
+        packCount={deltaPacks}
+        onPacksUpdated={(cnt) => setDeltaPacks(cnt)}
+        onRenownUpdated={(newRenown) => {
+          setRankedProfile(RankedSystem.getProfile());
+          engineRef.current?.reloadViewmodelSkin();
+        }}
+      />
+
+      <CodeRedeemModal
+        isOpen={showCodeRedeem}
+        onClose={() => setShowCodeRedeem(false)}
+        onRenownUpdated={(newRenown) => {
+          setRankedProfile(RankedSystem.getProfile());
+          setDeltaPacks(SkinManager.getDeltaPackCount());
+        }}
+      />
     </div>
   );
 }

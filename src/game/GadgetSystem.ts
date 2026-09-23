@@ -253,15 +253,28 @@ export class GadgetSystem {
         name = 'Talon-8 Clear Shield';
         isElectronic = false;
         const shieldGlass = new THREE.Mesh(
-          new THREE.BoxGeometry(1.2, 0.95, 0.06),
-          new THREE.MeshPhysicalMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45, roughness: 0.1, transmission: 0.85 })
+          new THREE.BoxGeometry(1.2, 0.95, 0.04),
+          new THREE.MeshPhysicalMaterial({
+            color: 0xa5f3fc,
+            transparent: true,
+            opacity: 0.16,
+            roughness: 0.03,
+            metalness: 0.02,
+            transmission: 0.96,
+            depthWrite: false
+          })
         );
         shieldGlass.position.y = 0.48;
         const shieldFrame = new THREE.Mesh(
           new THREE.BoxGeometry(1.25, 0.1, 0.12),
           new THREE.MeshStandardMaterial({ color: 0x18181b, metalness: 0.9 })
         );
-        group.add(shieldGlass, shieldFrame);
+        const topRail = new THREE.Mesh(
+          new THREE.BoxGeometry(1.24, 0.05, 0.06),
+          new THREE.MeshStandardMaterial({ color: 0x27272a, metalness: 0.85 })
+        );
+        topRail.position.y = 0.95;
+        group.add(shieldGlass, shieldFrame, topRail);
         radius = 1.2;
         hp = 450;
         break;

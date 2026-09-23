@@ -14,7 +14,10 @@ import {
   getRecommendedWeaponIndex
 } from './BreachProtocol';
 import { ModelFactory } from './ModelFactory';
+import { RankedSystem } from './RankedSystem';
+import { SkinManager, WEAPON_SKINS } from './SkinShopData';
 import { HouseMapBuilder, DestructibleBarricade, RappelWall, ColliderAABB } from './HouseMap';
+import { ProceduralTextures } from './TextureFactory';
 import { ReconDrone } from './ReconDrone';
 import { gadgetSystem, ActiveGadget } from './GadgetSystem';
 import { sound as audioSystem } from '../audio/SoundEngine';
@@ -68,6 +71,8 @@ export interface BotUnit {
   pathWaypoints?: THREE.Vector3[];
   pathIndex?: number;
   burstShotsLeft?: number;
+  reinforcementsLeft?: number;
+  reinforceTimer?: number;
   // Added for operator-ability parity: mirrors the equivalent player-side fields
   // (this.player.shielded / this.player.cloaked) so bots get the same mechanical effect.
   shielded?: boolean;
@@ -183,6 +188,7 @@ export class BreachProtocolEngine {
     rappelCableMesh: null as THREE.Line | null,
     // Breaching State
     breachChargesLeft: 2,
+    reinforcementsLeft: 2,
     activeBreachCharge: null as PlacedBreachCharge | null,
     // Tactical Gadget States
     gadgetCharges: 2,
@@ -194,12 +200,16 @@ export class BreachProtocolEngine {
     isSilencedFootsteps: false,
     isLionScanning: false,
     isDokkaebiRinging: false,
+    kills: 0,
+    score: 0,
   };
 
-  public LEAN_OFFSET_X = 0.55;
-  public LEAN_OFFSET_Y = -0.04;
-  public LEAN_ROTATION = 0.12;
-  public LEAN_TRANSITION_SPEED = 9;
+  public LEAN_OFFSET_X = 0.74; // Pronounced tactical lean peek
+  public LEAN_OFFSET_Y = -0.05;
+  public LEAN_ROTATION = 0.22; // Deep head tilt around corners
+  public LEAN_TRANSITION_SPEED = 12;
+  public hammerSwingTimer: number = 0;
+  public readonly HAMMER_SWING_DURATION = 0.38;
   public PLAYER_RADIUS = 0.4;
   public PLAYER_H = 1.7;
 
@@ -219,6 +229,7 @@ export class BreachProtocolEngine {
     defuserPlanted: false,
     defuseProgress: 0,
     plantProgress: 0,
+    reinforceProgress: 0,
     defuserTimer: 45.0,
     defuserPos: null as THREE.Vector3 | null,
     defuserMesh: null as THREE.Group | null,
@@ -232,6 +243,9 @@ export class BreachProtocolEngine {
   public inDroneMode: boolean = false;
   public droneSpottedEnemies: Set<string> = new Set();
   public isHoldingThrow: boolean = false;
+  public isHoldingHammer: boolean = false;
+  public isHoldingShield: boolean = false;
+  public isHoldingDevice: boolean = false;
   // Set by toggleHeldGadget() (Tab) when an attacker equips a breach charge into their hands
   // instead of instantly slapping it onto the nearest wall with [B] — left-click then plants
   // it wherever they're aiming, same as G-held cameras.
@@ -313,8 +327,8 @@ export class BreachProtocolEngine {
   public isAimingThrow: boolean = false;
   public breachPreviewMesh?: THREE.Mesh;
   // Tracks which model is currently built into gadgetViewmodelGroup so updateGadgetViewmodel()
-  // only rebuilds the rig when the held item actually changes kind (camera vs breach charge).
-  private heldGadgetKind: 'camera' | 'breach_charge' | null = null;
+  // only rebuilds the rig when the held item actually changes kind.
+  private heldGadgetKind: 'camera' | 'breach_charge' | 'hammer' | 'shield' | 'device' | null = null;
   public viewmodelBob: number = 0;
   public viewmodelKick: number = 0;
 
@@ -419,6 +433,10 @@ export class BreachProtocolEngine {
     },
     rappelHook: () => this.sfx(700, 0.15, 'triangle', 0.09),
     woodSnap: () => this.sfx(150, 0.1, 'square', 0.1),
+    playMetalImpact: () => {
+      this.sfx(320, 0.12, 'square', 0.15);
+      this.scheduleTimeout(() => this.sfx(180, 0.2, 'sawtooth', 0.12), 40);
+    },
     pingHostile: () => {
       this.sfx(880, 0.1, 'sine', 0.12);
       this.scheduleTimeout(() => this.sfx(1100, 0.12, 'sine', 0.14), 80);
@@ -667,6 +685,7 @@ export class BreachProtocolEngine {
     this.player.leanAmount = 0;
     this.player.crouching = false;
     this.player.breachChargesLeft = 2;
+    this.player.reinforcementsLeft = this.player.side === 'def' ? 2 : 0;
     this.player.gadgetCharges = this.player.op.charges || 2;
     this.player.activeGadgetType = this.player.op.gadgetType || 'generic';
     this.player.isThermalVision = false;
@@ -681,6 +700,7 @@ export class BreachProtocolEngine {
     this.match.defuserPlanted = false;
     this.match.defuseProgress = 0;
     this.match.plantProgress = 0;
+    this.match.reinforceProgress = 0;
     this.match.defuserTimer = 45.0;
     this.match.defuserPos = null;
     this.match.defuserMesh = null;
@@ -1234,6 +1254,8 @@ export class BreachProtocolEngine {
         lastPeekOrigin: null,
         gadgetCooldown: 4 + Math.random() * 8,
         gadgetCharges: op.charges || 2,
+        reinforcementsLeft: side === 'def' ? 2 : 0,
+        reinforceTimer: 0,
         hasPlacedPrepGadget: false,
         assignedRole: isRoamer ? 'roamer' : 'anchor'
       });
@@ -1269,8 +1291,44 @@ export class BreachProtocolEngine {
       return;
     }
 
+    // Authentic competitive rule: Switch teams after 3 points are played!
+    const totalPointsPlayed = this.match.scoreAtk + this.match.scoreDef;
+    if (totalPointsPlayed === 3) {
+      this.switchTeams();
+    }
+
     this.match.round++;
     this.beginRound();
+  }
+
+  public switchTeams() {
+    const oldSide = this.player.side;
+    this.player.side = oldSide === 'atk' ? 'def' : 'atk';
+
+    // Pick an operator from the new team side
+    const availableOps = OPERATORS.filter(o => o.side === this.player.side);
+    const chosenOp = availableOps.find(o => o.id === (this.player.side === 'atk' ? 'sledge' : 'doc')) || availableOps[0];
+    this.player.op = chosenOp;
+    this.player.weaponIdx = getRecommendedWeaponIndex(chosenOp);
+
+    // Swap sides for all bots
+    for (const bot of this.bots) {
+      bot.side = bot.side === 'atk' ? 'def' : 'atk';
+      const botPool = OPERATORS.filter(o => o.side === bot.side);
+      const assigned = botPool[Math.floor(Math.random() * botPool.length)];
+      bot.op = assigned;
+    }
+
+    // Reset defuser state
+    this.match.defuserPlanted = false;
+    this.match.defuserCarrier = this.player.side === 'atk' ? 'player' : (this.bots.find(b => b.side === 'atk')?.id || 'player');
+
+    this.sound.secure();
+    const sideName = this.player.side === 'atk' ? 'ATTACKERS 🔴' : 'DEFENDERS 🔵';
+    this.log(`⚡ SIDES SWITCHED! (3 points reached) — You are now playing as ${sideName}!`);
+
+    networkClient.notifyTeamSwitch(this.player.side);
+    this.onStateUpdate?.();
   }
 
   // ---------------------------------------------------------------------
@@ -1327,7 +1385,8 @@ export class BreachProtocolEngine {
     }
 
     const currentWpn = this.currentWeapon();
-    const rig = ModelFactory.createFirstPersonRig(currentWpn.id);
+    const skin = SkinManager.getEquippedSkin();
+    const rig = ModelFactory.createFirstPersonRig(currentWpn.id, skin);
     this.viewmodelGroup = rig.root;
     this.viewmodelWeapon = rig.weaponGroup;
     this.viewmodelFlash = rig.flashSprite;
@@ -1349,13 +1408,23 @@ export class BreachProtocolEngine {
     }
   }
 
+  public reloadViewmodelSkin() {
+    this.initFirstPersonRig();
+  }
+
   // Swap the first-person view between the weapon rig and whichever hand-held gadget rig
   // matches what's currently equipped (isHoldingThrow → camera, holdingBreachCharge →
   // breach charge). Called whenever either of those flags changes so the viewmodel always
   // matches what the player is actually about to do with a left-click.
   public updateGadgetViewmodel() {
     if (!this.gadgetViewmodelGroup || !this.camera) return;
-    const desiredKind: 'camera' | 'breach_charge' | null = this.holdingBreachCharge
+    const desiredKind: 'camera' | 'breach_charge' | 'hammer' | 'shield' | 'device' | null = this.isHoldingHammer
+      ? 'hammer'
+      : this.isHoldingShield
+      ? 'shield'
+      : this.isHoldingDevice
+      ? 'device'
+      : this.holdingBreachCharge
       ? 'breach_charge'
       : this.isHoldingThrow
       ? 'camera'
@@ -1471,6 +1540,22 @@ export class BreachProtocolEngine {
       }
       return;
     }
+    if (e.button === 0 && this.isHoldingHammer) {
+      // SLEDGE HAMMER SMASH!
+      if (this.hammerSwingTimer <= 0) {
+        this.hammerSwingTimer = this.HAMMER_SWING_DURATION;
+        this.useAbility();
+      }
+      return;
+    }
+    if (e.button === 0 && this.isHoldingShield) {
+      this.useAbility();
+      return;
+    }
+    if (e.button === 0 && this.isHoldingDevice) {
+      this.useAbility();
+      return;
+    }
     if (e.button === 0 && (this.isHoldingThrow || this.holdingBreachCharge)) {
       // A gadget is equipped via [TAB] (or [G] for cameras) — press and hold to aim (shows
       // the trajectory arc or a placement decal), release to actually throw/place it. See
@@ -1514,10 +1599,7 @@ export class BreachProtocolEngine {
   private onKeyDown(e: KeyboardEvent) {
     this.keys[e.code] = true;
     if (!this.started) return;
-    // Tab equips/holsters the shield gadget (Montagne/Blackbeard) with a single press —
-    // press once to raise it, press again to lower it and return to the weapon. Also
-    // prevents the browser's default focus-cycling behavior from stealing keyboard focus
-    // off the game canvas.
+    // Tab equips/toggles the main tactical gadget (Sledge Breaching Hammer, Montagne/Blitz shield, cameras, breach charges, device)
     if (e.code === 'Tab') {
       e.preventDefault();
       if (!e.repeat) this.toggleHeldGadget();
@@ -1601,17 +1683,25 @@ export class BreachProtocolEngine {
       this.handleBreachKey();
     }
     if (e.code === 'Digit1') {
+      this.holdMainGadget(false);
       const opId = this.player.op?.id;
       if (opId === 'sledge') this.setWeaponIndex(5);
       else if (opId === 'montagne' || opId === 'blitz') this.setWeaponIndex(6);
       else if (opId === 'glaz') this.setWeaponIndex(0);
       else if (this.player.weaponIdx === 4) this.setWeaponIndex(1);
     }
-    if (e.code === 'Digit2') { this.setWeaponIndex(4); }
+    if (e.code === 'Digit2') {
+      this.holdMainGadget(false);
+      this.setWeaponIndex(4);
+    }
   }
 
   private onKeyUp(e: KeyboardEvent) {
     this.keys[e.code] = false;
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      return;
+    }
     if (e.code === 'KeyG' && this.isHoldingThrow) {
       this.isHoldingThrow = false;
       this.updateGadgetViewmodel();
@@ -1672,6 +1762,9 @@ export class BreachProtocolEngine {
   }
 
   public setWeaponIndex(idx: number) {
+    if (this.isHoldingHammer || this.isHoldingShield || this.isHoldingDevice || this.isHoldingThrow || this.holdingBreachCharge) {
+      this.holdMainGadget(false);
+    }
     if (this.player.weaponIdx === idx) return;
     this.player.weaponIdx = idx;
     this.initFirstPersonRig();
@@ -1887,9 +1980,13 @@ export class BreachProtocolEngine {
     // Massive Explosion Debris & Splinters
     this.spawnBreachExplosion(blastPos, charge.normal);
 
-    // Destroy Barricade if attached
+    // Destroy Barricade or Soft Wall if attached
     if (charge.targetBarricade && !charge.targetBarricade.isBreached) {
-      this.breachBarricade(charge.targetBarricade, false);
+      if (charge.targetBarricade.isHardWall) {
+        this.log('[BREACH] Standard Breach Charge deflected by Reinforced Hard Wall! Requires Hard Breacher (Thermite/Hibana/Ace/Maverick).');
+      } else {
+        this.breachBarricade(charge.targetBarricade, false);
+      }
     }
 
     // Damage enemies / bots near blast radius
@@ -1914,18 +2011,109 @@ export class BreachProtocolEngine {
     this.onStateUpdate?.();
   }
 
+  public reinforceSoftWall(barricade: DestructibleBarricade, byBot: boolean = false, actorName: string = 'Defender') {
+    if (barricade.isReinforced || barricade.isBreached || !barricade.isSoftWall) return;
+
+    barricade.isSoftWall = false;
+    barricade.isHardWall = true;
+    barricade.isReinforced = true;
+    barricade.hp = 500;
+    barricade.label = 'Hard Wall (Reinforced)';
+
+    // Replace 3D visual drywall mesh with heavy reinforced steel panels
+    while (barricade.mesh.children.length > 0) {
+      barricade.mesh.remove(barricade.mesh.children[0]);
+    }
+
+    const isXAxis = Math.abs(barricade.normal.x) > 0.5;
+    const w = isXAxis ? (barricade.depth || 0.25) : barricade.width;
+    const h = barricade.height;
+    const d = isXAxis ? barricade.width : (barricade.depth || 0.25);
+
+    const reinfTex = ProceduralTextures.createReinforcedWallTexture(Math.max(1, Math.round(barricade.width / 1.5)), 2);
+    const steelMat = new THREE.MeshStandardMaterial({
+      map: reinfTex,
+      roughness: 0.38,
+      metalness: 0.85,
+      color: 0xdde2e8
+    });
+    const bracketMat = new THREE.MeshStandardMaterial({ color: 0x11161b, metalness: 0.9, roughness: 0.3 });
+    const boltMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.95, roughness: 0.2 });
+
+    // Heavy reinforced steel slab
+    const steel = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), steelMat);
+    steel.castShadow = true;
+    steel.receiveShadow = true;
+    barricade.mesh.add(steel);
+
+    // Heavy top and bottom mounting anchor brackets
+    const anchorTop = new THREE.Mesh(
+      isXAxis ? new THREE.BoxGeometry(w + 0.05, 0.18, d * 0.96) : new THREE.BoxGeometry(w * 0.96, 0.18, d + 0.05),
+      bracketMat
+    );
+    anchorTop.position.set(0, h / 2 - 0.1, 0);
+
+    const anchorBot = new THREE.Mesh(
+      isXAxis ? new THREE.BoxGeometry(w + 0.05, 0.18, d * 0.96) : new THREE.BoxGeometry(w * 0.96, 0.18, d + 0.05),
+      bracketMat
+    );
+    anchorBot.position.set(0, -h / 2 + 0.1, 0);
+    barricade.mesh.add(anchorTop, anchorBot);
+
+    // Anchor locking bolts
+    for (let b = -0.4; b <= 0.4; b += 0.8) {
+      const bolt1 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.06, 8), boltMat);
+      bolt1.rotation.x = Math.PI / 2;
+      bolt1.position.set(isXAxis ? 0 : b * (w * 0.8), h / 2 - 0.1, isXAxis ? b * (d * 0.8) : 0);
+
+      const bolt2 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.06, 8), boltMat);
+      bolt2.rotation.x = Math.PI / 2;
+      bolt2.position.set(isXAxis ? 0 : b * (w * 0.8), -h / 2 + 0.1, isXAxis ? b * (d * 0.8) : 0);
+      barricade.mesh.add(bolt1, bolt2);
+    }
+
+    // Update matching collider with reinforced property
+    const col = this.colliders.find(c => c.name === barricade.id);
+    if (col) {
+      col.reinforced = true;
+    }
+
+    this.sound.playMetalImpact();
+    this.spawnMetalDebris(barricade.position, barricade.normal, 14);
+
+    this.log(`[FORTIFY] ${actorName} deployed heavy ballistic steel reinforcement on ${barricade.label || 'Wall'}!`);
+    networkClient.notifyWallReinforced(barricade.id);
+    this.onStateUpdate?.();
+  }
+
   public breachBarricade(barricade: DestructibleBarricade, byKick: boolean = false) {
     if (barricade.isBreached) return;
-    barricade.isBreached = true;
-    this.sound.woodSnap();
 
-    // Animate wooden planks splintering outwards
-    this.spawnSplinterDebris(barricade.position, barricade.normal, 25);
+    if (barricade.isReinforced || barricade.isHardWall) {
+      // Reinforced hard walls DO NOT break or make a hole when breached — heavy ballistic steel holds firm!
+      this.sound.playMetalImpact();
+      this.spawnMetalDebris(barricade.position, barricade.normal, 16);
+      this.log('[FORTIFIED] Ballistic steel reinforcement held firm! Wall cannot be breached into a hole.');
+      this.onStateUpdate?.();
+      return;
+    }
+
+    barricade.isBreached = true;
+
+    if (barricade.isSoftWall) {
+      this.sound.woodSnap();
+      this.spawnPlasterDebris(barricade.position, barricade.normal, 22);
+      this.spawnSplinterDebris(barricade.position, barricade.normal, 16);
+    } else {
+      this.sound.woodSnap();
+      this.spawnSplinterDebris(barricade.position, barricade.normal, 25);
+    }
+
     this.scene.remove(barricade.mesh);
 
     // Remove matching collider so players and bots can traverse through!
     this.colliders = this.colliders.filter(
-      c => c.name !== barricade.id && !(Math.abs((c.minX + c.maxX) / 2 - barricade.position.x) < 1.2 && Math.abs((c.minZ + c.maxZ) / 2 - barricade.position.z) < 1.2 && c.minY >= barricade.position.y - 0.2 && c.maxY <= barricade.position.y + barricade.height + 0.2)
+      c => c.name !== barricade.id && !(Math.abs((c.minX + c.maxX) / 2 - barricade.position.x) < 2.0 && Math.abs((c.minZ + c.maxZ) / 2 - barricade.position.z) < 2.0 && c.minY >= barricade.position.y - 0.5 && c.maxY <= barricade.position.y + barricade.height + 0.5)
     );
 
     networkClient.notifyBarricadeBreach(barricade.id, barricade.position, barricade.normal);
@@ -1962,10 +2150,48 @@ export class BreachProtocolEngine {
     fireSphere.position.copy(pos);
     this.scene.add(fireSphere);
 
-    // Wooden Splinters
-    this.spawnSplinterDebris(pos, normal, 35);
+    // Wooden & Plaster Splinters
+    this.spawnSplinterDebris(pos, normal, 25);
+    this.spawnPlasterDebris(pos, normal, 20);
 
     this.scheduleTimeout(() => this.scene.remove(fireSphere), 200);
+  }
+
+  public spawnPlasterDebris(pos: THREE.Vector3, normal: THREE.Vector3, count: number) {
+    const plasterMat = new THREE.MeshStandardMaterial({ color: 0xece5d8, roughness: 0.95 });
+    for (let i = 0; i < count; i++) {
+      const s = 0.06 + Math.random() * 0.16;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(s, s, s * 0.6), plasterMat);
+      mesh.position.copy(pos).add(new THREE.Vector3((Math.random() - 0.5) * 1.0, (Math.random() - 0.5) * 1.0, (Math.random() - 0.5) * 1.0));
+
+      const vel = normal.clone().multiplyScalar(3.5 + Math.random() * 5.5);
+      vel.x += (Math.random() - 0.5) * 4.5;
+      vel.y += Math.random() * 3.5;
+      vel.z += (Math.random() - 0.5) * 4.5;
+
+      const rotVel = new THREE.Vector3(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+      this.scene.add(mesh);
+      this.debrisPieces.push({ mesh, vel, rotVel, life: 2.5 });
+    }
+  }
+
+  public spawnMetalDebris(pos: THREE.Vector3, normal: THREE.Vector3, count: number) {
+    const metalMat = new THREE.MeshStandardMaterial({ color: 0x3d4852, metalness: 0.8, roughness: 0.4 });
+    for (let i = 0; i < count; i++) {
+      const w = 0.08 + Math.random() * 0.18;
+      const h = 0.12 + Math.random() * 0.25;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.03), metalMat);
+      mesh.position.copy(pos).add(new THREE.Vector3((Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.8));
+
+      const vel = normal.clone().multiplyScalar(4.5 + Math.random() * 7);
+      vel.x += (Math.random() - 0.5) * 6;
+      vel.y += Math.random() * 4;
+      vel.z += (Math.random() - 0.5) * 6;
+
+      const rotVel = new THREE.Vector3(Math.random() * 10, Math.random() * 10, Math.random() * 10);
+      this.scene.add(mesh);
+      this.debrisPieces.push({ mesh, vel, rotVel, life: 3.2 });
+    }
   }
 
   public spawnSplinterDebris(pos: THREE.Vector3, normal: THREE.Vector3, count: number) {
@@ -1987,6 +2213,28 @@ export class BreachProtocolEngine {
     }
   }
 
+  public spawnShellCasing() {
+    const brassMat = new THREE.MeshStandardMaterial({
+      color: 0xdeb887,
+      metalness: 0.9,
+      roughness: 0.2
+    });
+    const casing = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.035, 6), brassMat);
+    const origin = this.camera.position.clone().add(new THREE.Vector3(0.12, -0.08, -0.2).applyEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ')));
+    casing.position.copy(origin);
+    casing.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+
+    const fwd = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ'));
+    const right = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(0, this.player.yaw, 0));
+    const vel = right.clone().multiplyScalar(1.8 + Math.random() * 0.8)
+      .add(new THREE.Vector3(0, 1.2 + Math.random() * 0.6, 0))
+      .add(fwd.clone().multiplyScalar(-0.4));
+
+    const rotVel = new THREE.Vector3(15 + Math.random() * 10, 12 + Math.random() * 10, 8);
+    this.scene.add(casing);
+    this.debrisPieces.push({ mesh: casing, vel, rotVel, life: 2.5 });
+  }
+
   // ---------------------------------------------------------------------
   // 5. SHOOTING & WEAPONS
   // ---------------------------------------------------------------------
@@ -2003,6 +2251,7 @@ export class BreachProtocolEngine {
     this.lastShot = now;
     this.player.ammoInMag[w.id]--;
     this.muzzleFlash();
+    this.spawnShellCasing();
     this.sound.shot();
     this.broadcastSound(this.player.pos.clone(), this.player.side, 22);
 
@@ -2110,11 +2359,45 @@ export class BreachProtocolEngine {
         return;
       }
 
-      // Check barricade damage
+      // Check barricade, soft wall, or hard wall damage
       const barricade = this.barricades.find(b => !b.isBreached && b.mesh.getObjectById(closest.object.id));
       if (barricade) {
-        barricade.hp -= this.currentWeapon().dmg;
-        this.spawnSplinterDebris(closest.point, barricade.normal, 4);
+        if (barricade.isHardWall) {
+          // Hard walls are bulletproof!
+          this.spawnImpact(closest.point, 0xa0aec0);
+          this.sound.hit();
+          return;
+        }
+
+        const dmg = this.currentWeapon().dmg;
+        barricade.hp -= dmg;
+
+        if (barricade.isSoftWall) {
+          this.spawnImpact(closest.point, 0xece5d8);
+          this.spawnPlasterDebris(closest.point, barricade.normal, 2);
+
+          // Bullet penetration through soft drywall (wallbangs!)
+          const penOrigin = closest.point.clone().add(dir.clone().multiplyScalar(0.35));
+          const penRaycaster = new THREE.Raycaster(penOrigin, dir, 0.05, 30);
+          const penHits = penRaycaster.intersectObjects(
+            ([...botTargets, ...remoteTargets] as THREE.Object3D[]),
+            true
+          );
+          if (penHits.length > 0) {
+            const penHit = penHits[0];
+            const penDmg = Math.round(dmg * 0.72);
+            const hitBot = this.bots.find(b => b.hitMesh === penHit.object || b.mesh.getObjectById(penHit.object.id));
+            if (hitBot) {
+              this.damageUnit(hitBot, penDmg);
+              this.spawnImpact(penHit.point, 0xff2222);
+              this.sound.hit();
+              this.log(`[TAC] WALLBANG! Bullet penetrated soft drywall for ${penDmg} DMG!`);
+            }
+          }
+        } else {
+          this.spawnSplinterDebris(closest.point, barricade.normal, 4);
+        }
+
         if (barricade.hp <= 0) {
           this.breachBarricade(barricade, false);
         }
@@ -2193,9 +2476,9 @@ export class BreachProtocolEngine {
       const muzzlePos = bot.mesh.position.clone().add(new THREE.Vector3(0, 1.2, 0));
       this.drawTracer(muzzlePos, toDrone, droneDist);
       this.sound.shot();
-      this.spawnImpact(this.drone.pos, 0xffaa33);
 
       if (Math.random() < 0.7 * diffMul) {
+        this.spawnImpact(this.drone.pos, 0xffaa33);
         this.drone.hp -= 20;
         if (this.drone.hp <= 0) {
           this.drone.destroy(this.scene);
@@ -2264,6 +2547,21 @@ export class BreachProtocolEngine {
         if (!bot.hasPlacedPrepGadget && this.match.phaseTimer < 18) {
           bot.hasPlacedPrepGadget = true;
           this.triggerBotGadget(bot);
+        }
+
+        // Defenders reinforce crucial unreinforced soft walls during prep phase
+        if ((bot.reinforcementsLeft ?? 0) > 0 && this.match.phaseTimer < 20) {
+          const nearbySoft = this.barricades.find(
+            b => !b.isBreached && b.isSoftWall && !b.isReinforced && b.position.distanceTo(bot.mesh.position) < 3.2
+          );
+          if (nearbySoft) {
+            bot.reinforceTimer = (bot.reinforceTimer || 0) + dt;
+            if (bot.reinforceTimer >= 2.2) {
+              this.reinforceSoftWall(nearbySoft, true, bot.op.name);
+              bot.reinforcementsLeft = Math.max(0, (bot.reinforcementsLeft || 1) - 1);
+              bot.reinforceTimer = 0;
+            }
+          }
         }
 
         // If an active recon drone is buzzing around, defenders try to shoot it down
@@ -2458,8 +2756,13 @@ export class BreachProtocolEngine {
         const spd = 2.4 * diffMul * (bot.speedBoost ?? 1) * dt;
         const nx = bot.mesh.position.x + (dx / dist) * spd;
         const nz = bot.mesh.position.z + (dz / dist) * spd;
-        if (!this.collides(nx, nz, bot.mesh.position.y + 1.2, 0.32, 1.7)) {
+        const testY = bot.mesh.position.y + 1.2;
+        if (!this.collides(nx, nz, testY, 0.32, 1.7)) {
           bot.mesh.position.x = nx;
+          bot.mesh.position.z = nz;
+        } else if (!this.collides(nx, bot.mesh.position.z, testY, 0.32, 1.7)) {
+          bot.mesh.position.x = nx;
+        } else if (!this.collides(bot.mesh.position.x, nz, testY, 0.32, 1.7)) {
           bot.mesh.position.z = nz;
         } else {
           // If stuck against obstacle, recalculate path
@@ -2558,9 +2861,6 @@ export class BreachProtocolEngine {
             this.damageUnit(sighting.info.unit, dmg);
             this.spawnImpact(targetPt, 0xff3333);
           }
-        } else {
-          // Ricochet spark nearby
-          this.spawnImpact(targetPt.clone().add(new THREE.Vector3((Math.random() - 0.5) * 1.5, 0, (Math.random() - 0.5) * 1.5)), 0xffcc44);
         }
 
         this.broadcastSound(bot.mesh.position.clone(), bot.side, 20);
@@ -2603,6 +2903,15 @@ export class BreachProtocolEngine {
         seenDist = d;
       }
     }
+    // Perceive remote human players on opposing LAN team
+    networkClient.remotePlayers.forEach(rp => {
+      if (rp.side === bot.side || !rp.alive) return;
+      const d = bot.mesh.position.distanceTo(rp.pos);
+      if (d < sightRange && d < seenDist && this.canSee(bot, rp.pos, sightRange)) {
+        seen = { pos: rp.pos, isPlayer: false };
+        seenDist = d;
+      }
+    });
     this.bots.forEach(o => {
       if (o === bot || !o.alive || o.side === bot.side || o.cloaked) return;
       const d = bot.mesh.position.distanceTo(o.mesh.position);
@@ -2715,6 +3024,10 @@ export class BreachProtocolEngine {
       bot.alive = false;
       bot.mesh.visible = false;
       bot.marker.visible = false;
+      if (bot.side !== this.player.side) {
+        this.player.kills = (this.player.kills || 0) + 1;
+        this.player.score = (this.player.score || 0) + 100;
+      }
       if (this.match.defuserCarrier === bot.id) this.dropDefuser(bot.mesh.position);
       this.log(`[AI-${bot.side.toUpperCase()}] ${bot.op.name} eliminated.`);
       this.checkRoundEnd();
@@ -2992,7 +3305,7 @@ export class BreachProtocolEngine {
       this.broadcastSound(this.player.pos.clone(), this.player.side, 8);
     }
 
-    // Leaning (Q / E)
+    // Leaning (Hold Q / E)
     const leftHeld = !!this.keys['KeyQ'];
     const rightHeld = !!this.keys['KeyE'];
     this.player.leanState = (leftHeld && !rightHeld) ? -1 : (rightHeld && !leftHeld) ? 1 : 0;
@@ -3068,6 +3381,7 @@ export class BreachProtocolEngine {
     this.updateViewmodel(dt, move.lengthSq() > 0);
     this.secureTick(dt);
     this.updateDefuserInteraction(dt);
+    this.updateWallReinforceInteraction(dt);
   }
 
   public plantDefuser(planterPos: THREE.Vector3 = this.player.pos) {
@@ -3161,6 +3475,46 @@ export class BreachProtocolEngine {
     }
   }
 
+  public updateWallReinforceInteraction(dt: number) {
+    if (this.match.phase !== 'prep' && this.match.phase !== 'action') return;
+    if (this.player.side !== 'def' || !this.player.alive || (this.player.reinforcementsLeft ?? 0) <= 0) {
+      if (this.match.reinforceProgress > 0) {
+        this.match.reinforceProgress = 0;
+        this.onStateUpdate?.();
+      }
+      return;
+    }
+
+    const nearbySoftWall = this.barricades.find(
+      b => !b.isBreached && b.isSoftWall && !b.isReinforced && b.position.distanceTo(this.player.pos) < 2.8
+    );
+
+    if (nearbySoftWall) {
+      if (this.keys['Slash'] || this.keys['KeyE'] || this.keys['KeyF']) {
+        this.match.reinforceProgress = Math.min(100, (this.match.reinforceProgress || 0) + dt * 45);
+        if (Math.random() < 0.12) {
+          this.sound.playMetalImpact();
+        }
+        if (this.match.reinforceProgress >= 100) {
+          this.reinforceSoftWall(nearbySoftWall, false, 'Player');
+          this.player.reinforcementsLeft = Math.max(0, (this.player.reinforcementsLeft || 0) - 1);
+          this.match.reinforceProgress = 0;
+        }
+        this.onStateUpdate?.();
+      } else {
+        if (this.match.reinforceProgress > 0) {
+          this.match.reinforceProgress = Math.max(0, this.match.reinforceProgress - dt * 50);
+          this.onStateUpdate?.();
+        }
+      }
+    } else {
+      if (this.match.reinforceProgress > 0) {
+        this.match.reinforceProgress = 0;
+        this.onStateUpdate?.();
+      }
+    }
+  }
+
   public secureTick(dt: number) {
     if (this.match.phase !== 'action') return;
     const r = this.match.secureRadius;
@@ -3181,20 +3535,55 @@ export class BreachProtocolEngine {
   }
 
   public updateViewmodel(dt: number, isMoving: boolean) {
-    if (!this.viewmodelGroup) return;
     this.viewmodelBob += dt * (isMoving ? 9 : 2.2);
     const bobAmt = isMoving ? 0.018 : 0.004;
-    const targetX = 0.14 + Math.sin(this.viewmodelBob * 0.5) * 0.004;
-    const targetY = -0.15 + Math.sin(this.viewmodelBob) * bobAmt;
-    this.viewmodelGroup.position.x += (targetX - this.viewmodelGroup.position.x) * Math.min(1, dt * 10);
-    this.viewmodelGroup.position.y += (targetY - this.viewmodelGroup.position.y) * Math.min(1, dt * 10);
 
-    if (this.viewmodelKick > 0) this.viewmodelKick = Math.max(0, this.viewmodelKick - dt * 7);
-    this.viewmodelGroup.rotation.x = -this.viewmodelKick * 0.12;
-    this.viewmodelGroup.position.z = -0.42 + this.viewmodelKick * 0.06;
+    if (this.viewmodelGroup) {
+      const targetX = 0.14 + Math.sin(this.viewmodelBob * 0.5) * 0.004;
+      const targetY = -0.15 + Math.sin(this.viewmodelBob) * bobAmt;
+      this.viewmodelGroup.position.x += (targetX - this.viewmodelGroup.position.x) * Math.min(1, dt * 10);
+      this.viewmodelGroup.position.y += (targetY - this.viewmodelGroup.position.y) * Math.min(1, dt * 10);
 
-    if (this.viewmodelFlash) {
-      this.viewmodelFlash.material.opacity = Math.max(0, this.viewmodelFlash.material.opacity - dt * 9);
+      if (this.viewmodelKick > 0) this.viewmodelKick = Math.max(0, this.viewmodelKick - dt * 7);
+      this.viewmodelGroup.rotation.x = -this.viewmodelKick * 0.12;
+      this.viewmodelGroup.position.z = -0.42 + this.viewmodelKick * 0.06;
+
+      if (this.viewmodelFlash) {
+        this.viewmodelFlash.material.opacity = Math.max(0, this.viewmodelFlash.material.opacity - dt * 9);
+      }
+    }
+
+    // Dynamic Sledge Breaching Hammer & Gadget Viewmodel Animation
+    if (this.gadgetViewmodelGroup && this.gadgetViewmodelGroup.visible) {
+      if (this.isHoldingHammer) {
+        if (this.hammerSwingTimer > 0) {
+          this.hammerSwingTimer = Math.max(0, this.hammerSwingTimer - dt);
+          const progress = 1.0 - (this.hammerSwingTimer / this.HAMMER_SWING_DURATION); // 0.0 -> 1.0
+
+          if (progress < 0.25) {
+            // High wind-up
+            const p = progress / 0.25;
+            this.gadgetViewmodelGroup.rotation.set(-0.35 * p, 0.15 * p, -0.25 * p);
+            this.gadgetViewmodelGroup.position.set(0.18 + 0.04 * p, -0.32 + 0.14 * p, -0.38 - 0.08 * p);
+          } else if (progress < 0.65) {
+            // Powerful downward impact smash
+            const p = (progress - 0.25) / 0.40;
+            this.gadgetViewmodelGroup.rotation.set(-0.35 + 1.25 * p, 0.15 - 0.1 * p, -0.25 + 0.45 * p);
+            this.gadgetViewmodelGroup.position.set(0.22 - 0.06 * p, -0.18 - 0.26 * p, -0.46 + 0.18 * p);
+          } else {
+            // Smooth recovery to ready stance
+            const p = (progress - 0.65) / 0.35;
+            this.gadgetViewmodelGroup.rotation.set(0.90 * (1.0 - p), 0.05 * (1.0 - p), 0.20 * (1.0 - p));
+            this.gadgetViewmodelGroup.position.set(0.16 + 0.02 * p, -0.44 + 0.12 * p, -0.28 - 0.10 * p);
+          }
+        } else {
+          // Idling / walking bob for sledge hammer
+          const bobH = Math.sin(this.viewmodelBob * 0.5) * 0.005;
+          const bobV = Math.sin(this.viewmodelBob) * (isMoving ? 0.015 : 0.003);
+          this.gadgetViewmodelGroup.position.set(0.18 + bobH, -0.32 + bobV, -0.38);
+          this.gadgetViewmodelGroup.rotation.set(0, 0, 0);
+        }
+      }
     }
   }
 
@@ -3395,6 +3784,11 @@ export class BreachProtocolEngine {
     // Barricade hit
     const barricade = this.barricades.find(b => !b.isBreached && b.mesh.getObjectById(closest.object.id));
     if (barricade) {
+      if (barricade.isHardWall || barricade.isReinforced) {
+        this.spawnImpact(closest.point, 0xa0aec0);
+        this.sound.hit();
+        return;
+      }
       barricade.hp -= bulletDmg;
       this.spawnSplinterDebris(closest.point, barricade.normal, 4);
       if (barricade.hp <= 0) {
@@ -4016,59 +4410,98 @@ export class BreachProtocolEngine {
   //    updateBreachPlantPreview().
   //  - Everyone else: has no holdable item, so Tab does nothing — it's deliberately not a
   //    second [F], just the equip button for gadgets that can actually be held.
-  public toggleHeldGadget() {
+  public holdMainGadget(holding: boolean) {
     if (!this.player.alive || this.inDroneMode || this.inCctvMode) return;
     if (this.match.phase !== 'action' && this.match.phase !== 'prep') return;
     const op = this.player.op;
 
-    // 1. Shield operators
-    if (op.id === 'montagne' || op.id === 'blackbeard') {
-      const next = !this.player.shielded;
-      this.player.shielded = next;
-      if (op.id === 'montagne') this.player.isFullShieldExtended = next;
-      this.sound.playGadgetDeploy();
-      this.log(next
-        ? (op.id === 'montagne' ? '[MONTAGNE] Le Roc Extended — 100% Frontal Bullet Immunity!' : '[BLACKBEARD] TARS Rifle Shield mounted!')
-        : (op.id === 'montagne' ? '[MONTAGNE] Le Roc Retracted.' : '[BLACKBEARD] Rifle Shield removed.'));
-      this.onStateUpdate?.();
-      return;
-    }
+    if (holding) {
+      // 1. Sledge: Tactical Breaching Hammer
+      if (op.id === 'sledge') {
+        this.isHoldingHammer = true;
+        this.updateGadgetViewmodel();
+        this.sound.playGadgetDeploy();
+        this.log('[TAB] Sledge Tactical Breaching Hammer equipped — click LMB to smash barricades & crush walls!');
+        this.onStateUpdate?.();
+        return;
+      }
 
-    // 2. Throwable-camera operators (Valkyrie/Maestro)
-    const throwType = this.getThrowableTypeForOperator();
-    if (throwType) {
-      if (!this.isHoldingThrow) {
+      // 2. Shield operators (Montagne / Blitz / Clash / Blackbeard)
+      if (op.id === 'montagne' || op.id === 'blackbeard' || op.id === 'blitz' || op.id === 'clash') {
+        this.player.shielded = true;
+        if (op.id === 'montagne') this.player.isFullShieldExtended = true;
+        this.isHoldingShield = true;
+        this.updateGadgetViewmodel();
+        this.sound.playGadgetDeploy();
+        this.log(op.id === 'montagne'
+          ? '[TAB] Montagne Le Roc Extended — 100% Frontal Bullet Immunity!'
+          : (op.id === 'blitz' ? '[TAB] Blitz Tactical Flash Shield Raised!' : '[TAB] Ballistic Shield Mounted!'));
+        this.onStateUpdate?.();
+        return;
+      }
+
+      // 3. Throwable / deployable device operators (Valkyrie/Maestro/Smoke/Thatcher/Mira/Lesion/Ela/etc.)
+      const throwType = this.getThrowableTypeForOperator();
+      if (throwType) {
         if (this.player.gadgetCharges !== undefined && this.player.gadgetCharges <= 0) {
-          this.log(`No remaining charges for ${this.player.op.gadgetName || 'ability'}!`);
+          this.log(`No remaining charges for ${this.player.op.gadgetName || 'gadget'}!`);
           return;
         }
         if (this.player.abilityCooldown > 0) {
-          this.log(`Ability recharging (${this.player.abilityCooldown.toFixed(1)}s remaining).`);
+          this.log(`Gadget recharging (${this.player.abilityCooldown.toFixed(1)}s remaining).`);
           return;
         }
-      }
-      this.isHoldingThrow = !this.isHoldingThrow;
-      this.updateGadgetViewmodel();
-      this.log(this.isHoldingThrow
-        ? `${this.player.op.gadgetName || 'Camera'} equipped — hold click to aim, release to throw it.`
-        : `${this.player.op.gadgetName || 'Camera'} holstered.`);
-      return;
-    }
-
-    // 3. Attacker breach charges
-    if (this.player.side === 'atk' && !this.player.activeBreachCharge) {
-      if (!this.holdingBreachCharge && this.player.breachChargesLeft <= 0) {
-        this.log('Out of Breach Charges!');
+        this.isHoldingThrow = true;
+        this.updateGadgetViewmodel();
+        this.sound.playGadgetDeploy();
+        this.log(`[TAB] ${this.player.op.gadgetName || 'Gadget'} equipped — release or click to deploy.`);
         return;
       }
-      this.holdingBreachCharge = !this.holdingBreachCharge;
-      this.updateGadgetViewmodel();
-      this.log(this.holdingBreachCharge ? 'Breach Charge equipped — hold click to aim, release to plant it.' : 'Breach Charge holstered.');
-      return;
-    }
 
-    // 4. Everyone else has no holdable/throwable item — Tab does nothing for them rather
-    // than duplicating [F]'s ability button.
+      // 4. Attacker breach charges (if attacker without special throwable)
+      if (this.player.side === 'atk' && !this.player.activeBreachCharge && this.player.breachChargesLeft > 0 && op.id !== 'ash' && op.id !== 'thermite' && op.id !== 'hibana' && op.id !== 'ace') {
+        this.holdingBreachCharge = true;
+        this.updateGadgetViewmodel();
+        this.log('[TAB] Breach Charge ready — aim at barricade/wall and click to place.');
+        return;
+      }
+
+      // 5. All other operators (Doc stim, Pulse scanner, Rook plates, Jäger ADS, Bandit battery, Frost mat, etc.)
+      this.isHoldingDevice = true;
+      this.updateGadgetViewmodel();
+      this.useAbility();
+      this.onStateUpdate?.();
+    } else {
+      // Releasing / Holstering: return to primary firearm
+      if (this.isHoldingHammer) {
+        this.isHoldingHammer = false;
+        this.log('[TAB] Sledge Hammer holstered, primary firearm readied.');
+      }
+      if (this.isHoldingShield || this.player.shielded) {
+        this.isHoldingShield = false;
+        this.player.shielded = false;
+        this.player.isFullShieldExtended = false;
+        this.log('[TAB] Shield lowered, primary firearm readied.');
+      }
+      if (this.isHoldingDevice) {
+        this.isHoldingDevice = false;
+      }
+      if (this.isHoldingThrow) {
+        this.isHoldingThrow = false;
+        this.isAimingThrow = false;
+      }
+      if (this.holdingBreachCharge) {
+        this.holdingBreachCharge = false;
+        this.isAimingThrow = false;
+      }
+      this.updateGadgetViewmodel();
+      this.onStateUpdate?.();
+    }
+  }
+
+  public toggleHeldGadget() {
+    const isAnyHeld = this.isHoldingHammer || this.isHoldingShield || this.isHoldingDevice || this.isHoldingThrow || this.holdingBreachCharge || this.player.shielded;
+    this.holdMainGadget(!isAnyHeld);
   }
 
   // Safety net: if the operator or side changed (loadout change) while something was held
@@ -4076,9 +4509,14 @@ export class BreachProtocolEngine {
   // no longer supports it.
   public updateHeldGadgets() {
     const op = this.player.op;
-    if (this.player.shielded && op.id !== 'montagne' && op.id !== 'blackbeard') {
+    if (this.player.shielded && op.id !== 'montagne' && op.id !== 'blackbeard' && op.id !== 'blitz' && op.id !== 'clash') {
       this.player.shielded = false;
       this.player.isFullShieldExtended = false;
+      this.isHoldingShield = false;
+    }
+    if (this.isHoldingHammer && op.id !== 'sledge') {
+      this.isHoldingHammer = false;
+      this.updateGadgetViewmodel();
     }
     if (this.isHoldingThrow && !this.getThrowableTypeForOperator()) {
       this.isHoldingThrow = false;
@@ -4118,10 +4556,16 @@ export class BreachProtocolEngine {
       case 'sledge': {
         this.sound.playSledgeSmash();
         this.screenShakeIntensity = 0.6;
-        const nearBarricade = this.barricades.find(b => !b.isBreached && b.position.distanceTo(eyePos) < 2.8);
+        const nearBarricade = this.barricades.find(b => !b.isBreached && b.position.distanceTo(eyePos) < 3.2);
         if (nearBarricade) {
-          this.breachBarricade(nearBarricade, false);
-          this.log('[SLEDGE] Tactical Breaching Hammer destroyed barricade!');
+          if (nearBarricade.isHardWall) {
+            this.sound.playMetalImpact();
+            this.spawnImpact(nearBarricade.position, 0xa0aec0);
+            this.log('[SLEDGE] Cannot crush Reinforced Hard Wall! Requires Hard Breacher (Thermite/Hibana/Ace/Maverick).');
+          } else {
+            this.breachBarricade(nearBarricade, false);
+            this.log(`[SLEDGE] Tactical Breaching Hammer destroyed ${nearBarricade.label || 'Wall/Barricade'}!`);
+          }
         } else {
           this.spawnSplinterDebris(eyePos.clone().add(fwd.clone().multiplyScalar(1.5)), fwd, 15);
           this.log('[SLEDGE] Tactical Breaching Hammer struck surface!');
@@ -4145,7 +4589,13 @@ export class BreachProtocolEngine {
         this.sound.breachExplode();
         const impactPos = eyePos.clone().add(fwd.clone().multiplyScalar(10));
         const nearB = this.barricades.find(b => !b.isBreached && b.position.distanceTo(impactPos) < 3.5);
-        if (nearB) this.breachBarricade(nearB, false);
+        if (nearB) {
+          if (nearB.isHardWall) {
+            this.log('[ASH] M120 CREM Breaching Round deflected by Reinforced Hard Wall! Requires Hard Breacher (Thermite/Hibana/Ace/Maverick).');
+          } else {
+            this.breachBarricade(nearB, false);
+          }
+        }
         this.spawnBreachExplosion(impactPos, fwd.clone().negate());
         this.bots.filter(b => b.alive && b.side !== this.player.side && b.mesh.position.distanceTo(impactPos) < 4.0).forEach(b => this.damageUnit(b, 65));
         this.player.gadgetCharges = (this.player.gadgetCharges || 1) - 1;
@@ -4253,10 +4703,17 @@ export class BreachProtocolEngine {
       case 'buck': {
         this.sound.shot();
         const nearB = this.barricades.find(b => !b.isBreached && b.position.distanceTo(eyePos) < 3.2);
-        if (nearB) this.breachBarricade(nearB, false);
+        if (nearB) {
+          if (nearB.isHardWall) {
+            this.sound.hit();
+            this.log('[BUCK] Skeleton Key 12-Gauge deflected by Reinforced Hard Wall! Requires Hard Breacher.');
+          } else {
+            this.breachBarricade(nearB, false);
+            this.log(`[BUCK] Skeleton Key 12-Gauge breached ${nearB.label || 'Wall/Barricade'}!`);
+          }
+        }
         this.spawnSplinterDebris(eyePos.clone().add(fwd.clone().multiplyScalar(2)), fwd, 16);
         this.player.abilityCooldown = 0.8;
-        this.log('[BUCK] Skeleton Key 12-Gauge breached target!');
         break;
       }
       case 'blackbeard': {
@@ -4370,13 +4827,11 @@ export class BreachProtocolEngine {
         break;
       }
       case 'maverick': {
-        // BUG FIX: consumed cooldown, played a sound, logged success — but never actually
-        // breached anything. Reuses the same soft-breach path Sledge/Buck use above.
         this.sound.playGasHiss(1.5);
-        const mavB = this.barricades.find(b => !b.isBreached && b.position.distanceTo(eyePos) < 2.8);
+        const mavB = this.barricades.find(b => !b.isBreached && b.position.distanceTo(eyePos) < 3.2);
         if (mavB) {
           this.breachBarricade(mavB, false);
-          this.log('[MAVERICK] Suri Torch melted murder hole through barrier!');
+          this.log(`[MAVERICK] Suri Torch melted murder hole through ${mavB.label || 'Wall/Barrier'}!`);
         } else {
           this.log('[MAVERICK] Suri Torch ignited — no surface in range.');
         }
@@ -4536,7 +4991,14 @@ export class BreachProtocolEngine {
       case 'ram': {
         this.sound.playSledgeSmash();
         const nearB = this.barricades.find(b => !b.isBreached && b.position.distanceTo(targetPos) < 3.2);
-        if (nearB) this.breachBarricade(nearB, false);
+        if (nearB) {
+          if (nearB.isHardWall) {
+            this.log('[RAM] BU-GI Auto-Breacher deflected by Reinforced Hard Wall! Requires Hard Breacher.');
+          } else {
+            this.breachBarricade(nearB, false);
+            this.log(`[RAM] BU-GI Auto-Breacher shredded ${nearB.label || 'Wall/Barricade'}!`);
+          }
+        }
         this.player.abilityCooldown = 6.0;
         this.log('[RAM] BU-GI Auto-Breacher launched shredding obstacles!');
         break;
@@ -5319,8 +5781,12 @@ export class BreachProtocolEngine {
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, dt * 14);
       this.camera.updateProjectionMatrix();
 
+      const isHoldingGadget = this.isHoldingHammer || this.isHoldingShield || this.isHoldingDevice || this.isHoldingThrow || this.holdingBreachCharge;
       if (this.viewmodelGroup) {
-        this.viewmodelGroup.visible = !this.inDroneMode && (!this.player.focusZoom || !currentWpn.isSniper);
+        this.viewmodelGroup.visible = !this.inDroneMode && !this.inCctvMode && !isHoldingGadget && (!this.player.focusZoom || !currentWpn.isSniper);
+      }
+      if (this.gadgetViewmodelGroup) {
+        this.gadgetViewmodelGroup.visible = !this.inDroneMode && !this.inCctvMode && isHoldingGadget && this.player.alive;
       }
 
       // Automatic continuous fire for fully-automatic weapons (AR, SMG)

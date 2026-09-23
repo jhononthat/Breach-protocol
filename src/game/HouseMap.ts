@@ -13,6 +13,11 @@ export interface DestructibleBarricade {
   normal: THREE.Vector3;
   isWindow: boolean;
   floor: number;
+  depth?: number;
+  isSoftWall?: boolean;
+  isHardWall?: boolean;
+  isReinforced?: boolean;
+  label?: string;
 }
 
 export interface RappelWall {
@@ -269,6 +274,168 @@ export class HouseMapBuilder {
         minZ: isXAxis ? z - w / 2 : z - 0.15,
         maxZ: isXAxis ? z + w / 2 : z + 0.15,
         h: y + h,
+        name: id
+      });
+
+      return barricade;
+    };
+
+    // Helper: Add Destructible Interior Soft Wall (drywall with internal wooden 2x4 studs)
+    const addSoftWall = (
+      id: string,
+      x: number,
+      y: number,
+      z: number,
+      w: number,
+      h: number,
+      d: number,
+      normal: THREE.Vector3,
+      floorNum: number,
+      hexColor = 0xece5d8
+    ) => {
+      const group = new THREE.Group();
+      group.position.set(x, y + h / 2, z);
+
+      const isXAxis = Math.abs(normal.x) > 0.5;
+      const wallTex = ProceduralTextures.createSoftWallDrywallTexture(hexColor, Math.max(1, Math.round((isXAxis ? d : w) / 1.5)), 2);
+      const drywallMat = new THREE.MeshStandardMaterial({
+        map: wallTex,
+        roughness: 0.9,
+        metalness: 0.05
+      });
+      const studMat = new THREE.MeshStandardMaterial({ color: 0x825b39, roughness: 0.85 });
+
+      // Outer drywall main volume
+      const drywall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), drywallMat);
+      drywall.castShadow = true;
+      drywall.receiveShadow = true;
+      group.add(drywall);
+
+      // Top & Bottom wooden baseboard trims
+      const trimB = new THREE.Mesh(new THREE.BoxGeometry(w + (isXAxis ? 0.02 : 0), 0.14, d + (isXAxis ? 0 : 0.02)), trimMat);
+      trimB.position.set(0, -h / 2 + 0.07, 0);
+      group.add(trimB);
+
+      // Internal timber studs
+      const studSpan = isXAxis ? d : w;
+      const numStuds = Math.max(2, Math.floor(studSpan / 0.8));
+      for (let i = 0; i < numStuds; i++) {
+        const offset = -studSpan / 2 + (i + 0.5) * (studSpan / numStuds);
+        const stud = new THREE.Mesh(
+          isXAxis ? new THREE.BoxGeometry(w * 0.7, h * 0.96, 0.08) : new THREE.BoxGeometry(0.08, h * 0.96, d * 0.7),
+          studMat
+        );
+        if (isXAxis) stud.position.set(0, 0, offset);
+        else stud.position.set(offset, 0, 0);
+        group.add(stud);
+      }
+
+      scene.add(group);
+
+      const barricade: DestructibleBarricade = {
+        id,
+        mesh: group,
+        position: new THREE.Vector3(x, y + h / 2, z),
+        width: isXAxis ? d : w,
+        height: h,
+        depth: isXAxis ? w : d,
+        isBreached: false,
+        hp: 85,
+        normal,
+        isWindow: false,
+        floor: floorNum,
+        isSoftWall: true,
+        isReinforced: false,
+        label: 'Soft Wall'
+      };
+      barricades.push(barricade);
+
+      colliders.push({
+        minX: x - w / 2,
+        maxX: x + w / 2,
+        minY: y,
+        maxY: y + h,
+        minZ: z - d / 2,
+        maxZ: z + d / 2,
+        h: y + h,
+        name: id
+      });
+
+      return barricade;
+    };
+
+    // Helper: Add Reinforced Heavy Hard Wall (bulletproof steel armor with hydraulic anchors)
+    const addHardWall = (
+      id: string,
+      x: number,
+      y: number,
+      z: number,
+      w: number,
+      h: number,
+      d: number,
+      normal: THREE.Vector3,
+      floorNum: number
+    ) => {
+      const group = new THREE.Group();
+      group.position.set(x, y + h / 2, z);
+
+      const isXAxis = Math.abs(normal.x) > 0.5;
+      const reinfTex = ProceduralTextures.createReinforcedWallTexture(Math.max(1, Math.round((isXAxis ? d : w) / 1.5)), 2);
+      const steelMat = new THREE.MeshStandardMaterial({
+        map: reinfTex,
+        roughness: 0.38,
+        metalness: 0.85,
+        color: 0xdde2e8
+      });
+      const bracketMat = new THREE.MeshStandardMaterial({ color: 0x11161b, metalness: 0.9, roughness: 0.3 });
+
+      // Main heavy steel reinforcement panel
+      const steel = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), steelMat);
+      steel.castShadow = true;
+      steel.receiveShadow = true;
+      group.add(steel);
+
+      // Heavy anchor brackets and locking handles
+      const anchorTop = new THREE.Mesh(
+        isXAxis ? new THREE.BoxGeometry(w + 0.05, 0.18, d * 0.95) : new THREE.BoxGeometry(w * 0.95, 0.18, d + 0.05),
+        bracketMat
+      );
+      anchorTop.position.set(0, h / 2 - 0.12, 0);
+      const anchorBot = new THREE.Mesh(
+        isXAxis ? new THREE.BoxGeometry(w + 0.05, 0.18, d * 0.95) : new THREE.BoxGeometry(w * 0.95, 0.18, d + 0.05),
+        bracketMat
+      );
+      anchorBot.position.set(0, -h / 2 + 0.12, 0);
+      group.add(anchorTop, anchorBot);
+
+      scene.add(group);
+
+      const barricade: DestructibleBarricade = {
+        id,
+        mesh: group,
+        position: new THREE.Vector3(x, y + h / 2, z),
+        width: isXAxis ? d : w,
+        height: h,
+        isBreached: false,
+        hp: 500,
+        normal,
+        isWindow: false,
+        floor: floorNum,
+        isHardWall: true,
+        isReinforced: true,
+        label: 'Hard Wall (Reinforced)'
+      };
+      barricades.push(barricade);
+
+      colliders.push({
+        minX: x - w / 2,
+        maxX: x + w / 2,
+        minY: y,
+        maxY: y + h,
+        minZ: z - d / 2,
+        maxZ: z + d / 2,
+        h: y + h,
+        reinforced: true,
         name: id
       });
 
@@ -614,32 +781,32 @@ export class HouseMapBuilder {
     // 5. INTERIOR ROOM ARCHITECTURE & WALLS (WATERTIGHT & ENCLOSED)
     // -------------------------------------------------------------
     // Foyer & Living Room Partition (X = -3)
-    // North wall segment (Z: -9 to -3)
-    addWall(-3, F1_Y, -6, 0.25, 3.2, 6.0, wallIntMat);
+    // North soft wall segment (Z: -9 to -3) — fully destructible drywall with wooden studs!
+    addSoftWall('soft_foyer_living', -3, F1_Y, -6, 0.25, 3.2, 6.0, new THREE.Vector3(1, 0, 0), 1);
     // Interior door header (leaves Z: -3 to -1 open for walking!)
     addWall(-3, F1_Y + 2.4, -2, 0.25, 0.8, 2.0, wallIntMat);
     // South wall segment (Z: -1 to +1)
-    addWall(-3, F1_Y, 0, 0.25, 3.2, 2.0, wallIntMat);
+    addSoftWall('soft_foyer_south', -3, F1_Y, 0, 0.25, 3.2, 2.0, new THREE.Vector3(1, 0, 0), 1);
 
     // Living Room & Kitchen Wide Open Archway (Z = +1, X: -12 to -3)
-    addWall(-10.5, F1_Y, 1, 3.0, 3.2, 0.25, wallIntMat);
+    addSoftWall('soft_living_arch_left', -10.5, F1_Y, 1, 3.0, 3.2, 0.25, new THREE.Vector3(0, 0, 1), 1);
     // Archway Header (clearance underneath from X: -9 to -6)
     addWall(-7.5, F1_Y + 2.6, 1, 3.0, 0.6, 0.25, wallIntMat);
-    addWall(-4.5, F1_Y, 1, 3.0, 3.2, 0.25, wallIntMat);
+    addSoftWall('soft_living_arch_right', -4.5, F1_Y, 1, 3.0, 3.2, 0.25, new THREE.Vector3(0, 0, 1), 1);
 
     // Kitchen & Hallway Dividing Wall (X = -3, Z: +1 to +9)
-    addWall(-3, F1_Y, 2.5, 0.25, 3.2, 3.0, wallIntMat);
+    addSoftWall('soft_kitchen_hall_front', -3, F1_Y, 2.5, 0.25, 3.2, 3.0, new THREE.Vector3(1, 0, 0), 1);
     // Kitchen door header (leaves Z: 4 to 6 open for doorway!)
     addWall(-3, F1_Y + 2.4, 5.0, 0.25, 0.8, 2.0, wallIntMat);
-    addWall(-3, F1_Y, 7.5, 0.25, 3.2, 3.0, wallIntMat);
+    addSoftWall('soft_kitchen_hall_back', -3, F1_Y, 7.5, 0.25, 3.2, 3.0, new THREE.Vector3(1, 0, 0), 1);
 
     // Garage Dividing Wall (X = +3, Z: -9 to +9)
-    // Front segment: Z: -9 to +1
-    addWall(3, F1_Y, -4, 0.25, 3.2, 10.0, wallIntMat);
+    // Front segment: Soft drywall partition protecting garage from hallway (Z: -9 to +1) — reinforceable!
+    addSoftWall('soft_garage_front', 3, F1_Y, -4, 0.25, 3.2, 10.0, new THREE.Vector3(-1, 0, 0), 1);
     // Interior garage door header (leaves Z: 1 to 3 open!)
     addWall(3, F1_Y + 2.4, 2, 0.25, 0.8, 2.0, wallIntMat);
-    // Rear segment: Z: +3 to +9
-    addWall(3, F1_Y, 6, 0.25, 3.2, 6.0, wallIntMat);
+    // Rear segment: Destructible soft wall between workshop & back (Z: +3 to +9)
+    addSoftWall('soft_garage_back', 3, F1_Y, 6, 0.25, 3.2, 6.0, new THREE.Vector3(-1, 0, 0), 1);
 
     // -------------------------------------------------------------
     // 6. STAIRCASE (SMOOTH CLIMBING FROM 1F TO 2F)
@@ -661,38 +828,38 @@ export class HouseMapBuilder {
     // 7. SECOND FLOOR ROOMS (MASTER BEDROOM, SOUTH SUITE, VAULT, LAB)
     // -------------------------------------------------------------
     // 2F West Interior Wall along X = -1.0 (separates West rooms from Hallway)
-    // Master Bedroom front segment (Z: -9 to -3)
-    addWall(-1.0, F2_Y, -6.0, 0.25, 3.2, 6.0, wallBedMat);
+    // Master Bedroom front soft wall (Z: -9 to -3)
+    addSoftWall('soft_bed_hall_front', -1.0, F2_Y, -6.0, 0.25, 3.2, 6.0, new THREE.Vector3(1, 0, 0), 2, 0xd9e2ec);
     // Master Bedroom door header (leaves Z: -3.0 to -1.2 open for 1.8m doorway!)
     addWall(-1.0, F2_Y + 2.4, -2.1, 0.25, 0.8, 1.8, wallBedMat);
     // Master Bedroom rear segment (Z: -1.2 to +2.0)
-    addWall(-1.0, F2_Y, 0.4, 0.25, 3.2, 3.2, wallBedMat);
-    // Master Bedroom South Wall along Z = +2.0 (X: -12 to -1.0)
-    addWall(-6.5, F2_Y, 2.0, 11.0, 3.2, 0.25, wallBedMat);
+    addSoftWall('soft_bed_hall_back', -1.0, F2_Y, 0.4, 0.25, 3.2, 3.2, new THREE.Vector3(1, 0, 0), 2, 0xd9e2ec);
+    // Master Bedroom South Wall along Z = +2.0 (X: -12 to -1.0) — Destructible soft drywall!
+    addSoftWall('soft_bed_south', -6.5, F2_Y, 2.0, 11.0, 3.2, 0.25, new THREE.Vector3(0, 0, 1), 2, 0xd9e2ec);
 
     // South Suite / Tactical Armory along X = -1.0 (Z: +2.0 to +9.0)
-    addWall(-1.0, F2_Y, 3.25, 0.25, 3.2, 2.5, wallBedMat);
+    addSoftWall('soft_armory_front', -1.0, F2_Y, 3.25, 0.25, 3.2, 2.5, new THREE.Vector3(1, 0, 0), 2, 0xd9e2ec);
     // South Suite door header (leaves Z: 4.5 to 6.3 open for 1.8m doorway!)
     addWall(-1.0, F2_Y + 2.4, 5.4, 0.25, 0.8, 1.8, wallBedMat);
-    addWall(-1.0, F2_Y, 7.65, 0.25, 3.2, 2.7, wallBedMat);
+    addSoftWall('soft_armory_back', -1.0, F2_Y, 7.65, 0.25, 3.2, 2.7, new THREE.Vector3(1, 0, 0), 2, 0xd9e2ec);
 
     // 2F East Interior Wall along X = +3.0 (separates Biohazard Vault & Lab from Hallway)
-    // Biohazard Vault front segment (Z: -9 to +1.6)
-    addWall(3.0, F2_Y, -3.7, 0.25, 3.2, 10.6, wallVaultMat);
+    // Biohazard Vault front segment: Soft Wall (Defenders must reinforce!) (Z: -9 to +1.6)
+    addSoftWall('soft_vault_front', 3.0, F2_Y, -3.7, 0.25, 3.2, 10.6, new THREE.Vector3(-1, 0, 0), 2, 0xd8d6cf);
     // Biohazard Vault Door Header (leaves Z: 1.6 to 3.4 open for Vault doorway!)
     addWall(3.0, F2_Y + 2.4, 2.5, 0.25, 0.8, 1.8, wallVaultMat);
     // Vault Barricade directly on hallway opening
     addBarricade('door_obj_site', 3.0, F2_Y, 2.5, 1.8, 2.4, false, new THREE.Vector3(-1, 0, 0), 2);
     // Vault dividing wall segment (Z: 3.4 to 4.0)
     addWall(3.0, F2_Y, 3.7, 0.25, 3.2, 0.6, wallVaultMat);
-    // Vault South Dividing Wall along Z = +4.0 (X: +3.0 to +12.0)
-    addWall(7.5, F2_Y, 4.0, 9.0, 3.2, 0.25, wallVaultMat);
+    // Vault South Dividing Wall along Z = +4.0 (X: +3.0 to +12.0) — Soft Wall (Defenders must reinforce!)
+    addSoftWall('soft_vault_south', 7.5, F2_Y, 4.0, 9.0, 3.2, 0.25, new THREE.Vector3(0, 0, 1), 2, 0xd8d6cf);
 
     // East Server Lab along X = +3.0 (Z: +4.0 to +9.0)
-    addWall(3.0, F2_Y, 4.75, 0.25, 3.2, 1.5, wallVaultMat);
+    addSoftWall('soft_lab_front', 3.0, F2_Y, 4.75, 0.25, 3.2, 1.5, new THREE.Vector3(-1, 0, 0), 2);
     // East Lab door header (leaves Z: 5.5 to 7.3 open for doorway!)
     addWall(3.0, F2_Y + 2.4, 6.4, 0.25, 0.8, 1.8, wallVaultMat);
-    addWall(3.0, F2_Y, 8.15, 0.25, 3.2, 1.7, wallVaultMat);
+    addSoftWall('soft_lab_back', 3.0, F2_Y, 8.15, 0.25, 3.2, 1.7, new THREE.Vector3(-1, 0, 0), 2);
 
     // -------------------------------------------------------------
     // 8. RICH ARCHITECTURAL LIGHTING (REALISTIC INTERIOR FIXTURES)
@@ -926,17 +1093,20 @@ export class HouseMapBuilder {
       rappelWalls,
       objectivePos: new THREE.Vector3(6.0, F2_Y + 0.25, 0), // top of 2F slab, not embedded in it
       spawnsAtk: [
-        [-2, -25],
-        [2, -25],
-        [-6, -25],
-        [6, -25]
+        [-2, -26],   // Front Street Tactical Cruiser
+        [-24, -6],   // West Construction Yard Flank
+        [24, -4],    // East Tree Line Alley
+        [0, 26],     // Riverside Garden / Back Docks
+        [-20, 18],   // South-West Perimeter
+        [20, 18]     // South-East Perimeter
       ],
       spawnsDef: [
-        [6.0, -1.5],
-        [8.5, 1.0],
-        [4.5, 1.5],
-        [-6.5, -4.0],
-        [1.0, 5.0]
+        [6.0, -1.0],   // 2F Biohazard Site Primary Anchor
+        [-6.5, -4.0],  // 2F Master Bedroom Lurker
+        [1.5, 3.5],    // 2F Hallway Staircase Guard
+        [-6.0, 5.0],   // 1F Kitchen Flanker
+        [7.5, -2.0],   // 1F Garage Roamer
+        [-4.0, -5.0]   // 1F Living Room / Foyer Watch
       ],
       animatedLights
     };

@@ -98,6 +98,86 @@ function addBarricade(
   return barricade;
 }
 
+function addSoftWall(
+  scene: THREE.Scene,
+  colliders: ColliderAABB[],
+  barricades: DestructibleBarricade[],
+  id: string,
+  x: number, y: number, z: number,
+  w: number, h: number, d: number,
+  normal: THREE.Vector3,
+  floorNum: number,
+  hexColor = 0xece5d8
+) {
+  const group = new THREE.Group();
+  group.position.set(x, y + h / 2, z);
+
+  const isXAxis = Math.abs(normal.x) > 0.5;
+  const wallTex = ProceduralTextures.createSoftWallDrywallTexture(hexColor, Math.max(1, Math.round((isXAxis ? d : w) / 1.5)), 2);
+  const drywallMat = new THREE.MeshStandardMaterial({
+    map: wallTex,
+    roughness: 0.9,
+    metalness: 0.05
+  });
+  const studMat = new THREE.MeshStandardMaterial({ color: 0x825b39, roughness: 0.85 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x2d3748, roughness: 0.7 });
+
+  const drywall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), drywallMat);
+  drywall.castShadow = true;
+  drywall.receiveShadow = true;
+  group.add(drywall);
+
+  const trimB = new THREE.Mesh(new THREE.BoxGeometry(w + (isXAxis ? 0.02 : 0), 0.14, d + (isXAxis ? 0 : 0.02)), trimMat);
+  trimB.position.set(0, -h / 2 + 0.07, 0);
+  group.add(trimB);
+
+  const studSpan = isXAxis ? d : w;
+  const numStuds = Math.max(2, Math.floor(studSpan / 0.8));
+  for (let i = 0; i < numStuds; i++) {
+    const offset = -studSpan / 2 + (i + 0.5) * (studSpan / numStuds);
+    const stud = new THREE.Mesh(
+      isXAxis ? new THREE.BoxGeometry(w * 0.7, h * 0.96, 0.08) : new THREE.BoxGeometry(0.08, h * 0.96, d * 0.7),
+      studMat
+    );
+    if (isXAxis) stud.position.set(0, 0, offset);
+    else stud.position.set(offset, 0, 0);
+    group.add(stud);
+  }
+
+  scene.add(group);
+
+  const barricade: DestructibleBarricade = {
+    id,
+    mesh: group,
+    position: new THREE.Vector3(x, y + h / 2, z),
+    width: isXAxis ? d : w,
+    height: h,
+    depth: isXAxis ? w : d,
+    isBreached: false,
+    hp: 85,
+    normal,
+    isWindow: false,
+    floor: floorNum,
+    isSoftWall: true,
+    isReinforced: false,
+    label: 'Soft Wall'
+  };
+  barricades.push(barricade);
+
+  colliders.push({
+    minX: x - w / 2,
+    maxX: x + w / 2,
+    minY: y,
+    maxY: y + h,
+    minZ: z - d / 2,
+    maxZ: z + d / 2,
+    h: y + h,
+    name: id
+  });
+
+  return barricade;
+}
+
 // Builds a straight exterior wall as real segments with true gaps wherever a door/window
 // sits in it. A continuous solid box with a barricade merely drawn on top of it does NOT
 // actually open when breached — the barricade's own collider is separate and much smaller
@@ -473,6 +553,10 @@ export function buildWarehouseDistrict(scene: THREE.Scene): BuiltMap {
   // rooftop exit), so the map's "no rappel" design intent is unchanged.
   const MEZZ_Y = 3.0, MEZZ_X0 = -21, MEZZ_X1 = -15, MEZZ_Z0 = -8, MEZZ_Z1 = 8;
   const deck = new THREE.Mesh(new THREE.BoxGeometry(MEZZ_X1 - MEZZ_X0, 0.2, MEZZ_Z1 - MEZZ_Z0), deckMat);
+
+  // Security Office Destructible Soft Drywall Partitions (Defenders can reinforce!)
+  addSoftWall(scene, colliders, barricades, 'soft_wh_office_front', 14, 0, 4, 0.25, 3.2, 6.0, new THREE.Vector3(-1, 0, 0), 0);
+  addSoftWall(scene, colliders, barricades, 'soft_wh_office_side', 17, 0, 1, 6.0, 3.2, 0.25, new THREE.Vector3(0, 0, -1), 0);
   deck.position.set((MEZZ_X0 + MEZZ_X1) / 2, MEZZ_Y, (MEZZ_Z0 + MEZZ_Z1) / 2);
   deck.receiveShadow = true; deck.castShadow = true;
   scene.add(deck);
@@ -518,9 +602,23 @@ export function buildWarehouseDistrict(scene: THREE.Scene): BuiltMap {
     barricades,
     rappelWalls, // none — single storey, no rooftop entry on this map
     objectivePos: new THREE.Vector3(0, 0.4, 0),
-    spawnsAtk: [[-14, -22], [-8, -22], [8, -22], [14, -22]],
-    spawnsDef: [[0, 12], [-10, 10], [10, 10], [0, -4], [-4, 4]]
-  , animatedLights
+    spawnsAtk: [
+      [0, -28],    // South Main Gate
+      [-26, 0],    // West Container Yard Flank
+      [26, 0],     // East Security Gate
+      [0, 28],     // North Loading Bay
+      [-18, -22],  // South-West Approach
+      [18, -22]    // South-East Approach
+    ],
+    spawnsDef: [
+      [0, 2],      // Central Vault Cage Anchor
+      [-10, 10],   // North-West Mezzanine Watch
+      [10, 10],    // North-East Crane Platform
+      [-8, -8],    // South-West Shipping Lane Roamer
+      [8, -8],     // South-East Container Flanker
+      [0, 14]      // North Loading Bay Ambush
+    ],
+    animatedLights
   };
 }
 
@@ -703,6 +801,11 @@ export function buildOfficeTower(scene: THREE.Scene): BuiltMap {
   addVisualBox(scene, -12, F2_Y, -4, 1.4, 0.75, 0.7, deskMat);
   addCeilingLight(scene, -11, F2_Y + H_WALL - 0.2, -3, 0xf5f5f4, 1.0);
 
+  // Office & Server Vault Destructible Soft Drywall Partitions (Defenders can reinforce!)
+  addSoftWall(scene, colliders, barricades, 'soft_office_server_front', 3, F2_Y, 2.5, 0.25, H_WALL, 4.0, new THREE.Vector3(-1, 0, 0), 1);
+  addSoftWall(scene, colliders, barricades, 'soft_office_boardroom_partition', -6, F2_Y, 1.5, 6.0, H_WALL, 0.25, new THREE.Vector3(0, 0, 1), 1);
+  addSoftWall(scene, colliders, barricades, 'soft_office_bullpen_divider', 4, F1_Y, 1.0, 0.25, H_WALL, 5.0, new THREE.Vector3(-1, 0, 0), 0);
+
   // Vault room wall now has a real doorway — previously a fully solid span, which meant a
   // defender who spawned inside the vault room could only ever leave by breaching their
   // own window, since there was no walkable way out.
@@ -734,8 +837,22 @@ export function buildOfficeTower(scene: THREE.Scene): BuiltMap {
     barricades,
     rappelWalls,
     objectivePos: new THREE.Vector3(9, F2_Y + 0.3, 8),
-    spawnsAtk: [[-4, -20], [4, -20], [-10, -18], [10, -18]],
-    spawnsDef: [[9, 9], [6, 5], [-2, -6], [-9, -3], [3, -8]],
+    spawnsAtk: [
+      [0, -26],    // South Main Plaza Entry
+      [24, 0],     // East Multi-level Parking Deck
+      [-24, 0],    // West Street Service Alley
+      [0, 26],     // North Courtyard Garden
+      [-16, -20],  // South-West Boulevard
+      [16, -20]    // South-East Boulevard
+    ],
+    spawnsDef: [
+      [9, 9],      // 2F Executive Server Vault Anchor
+      [6, 5],      // 2F Boardroom Watch
+      [-6, 6],     // 2F West Corner Office Lurk
+      [-2, -6],    // 1F Reception Desk Guard
+      [-9, -3],    // 1F Cubicle Bullpen Roamer
+      [3, -8]      // 1F Main Lobby Flanker
+    ],
     animatedLights
   };
 }

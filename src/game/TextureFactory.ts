@@ -268,6 +268,337 @@ export class ProceduralTextures {
   }
 
   /**
+   * Generates custom camo and uniform textures for any equipped OperatorSkin
+   */
+  public static createOperatorUniformTexture(skinId: string, camoType: string, col1: number, col2: number, col3: number): THREE.CanvasTexture {
+    const key = `op_uniform_${skinId}_${camoType}`;
+    if (this.cache[key]) return this.cache[key];
+
+    const c = document.createElement('canvas');
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext('2d')!;
+
+    const hex1 = '#' + col1.toString(16).padStart(6, '0');
+    const hex2 = '#' + col2.toString(16).padStart(6, '0');
+    const hex3 = '#' + col3.toString(16).padStart(6, '0');
+
+    ctx.fillStyle = hex1;
+    ctx.fillRect(0, 0, 256, 256);
+
+    if (camoType === 'cyber') {
+      // High-tech circuit grid & glowing neon lines
+      ctx.strokeStyle = hex2;
+      ctx.lineWidth = 2;
+      for (let x = 0; x < 256; x += 32) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, 256);
+        ctx.stroke();
+      }
+      for (let y = 0; y < 256; y += 32) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(256, y);
+        ctx.stroke();
+      }
+      // Glowing data nodes
+      ctx.fillStyle = hex3;
+      for (let i = 0; i < 20; i++) {
+        const nx = Math.floor(Math.random() * 8) * 32;
+        const ny = Math.floor(Math.random() * 8) * 32;
+        ctx.fillRect(nx - 4, ny - 4, 8, 8);
+      }
+    } else if (camoType === 'damascus') {
+      // Laser etched Damascus steel swirls
+      ctx.strokeStyle = hex2;
+      ctx.lineWidth = 3;
+      for (let y = 0; y < 256; y += 12) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        for (let x = 0; x <= 256; x += 20) {
+          const dy = Math.sin(x * 0.08 + y * 0.1) * 6;
+          ctx.lineTo(x, y + dy);
+        }
+        ctx.stroke();
+      }
+    } else if (camoType === 'molten') {
+      // Magma cracked stone with glowing lava veins
+      ctx.strokeStyle = hex2;
+      ctx.lineWidth = 4;
+      for (let i = 0; i < 16; i++) {
+        ctx.beginPath();
+        let px = Math.random() * 256;
+        let py = Math.random() * 256;
+        ctx.moveTo(px, py);
+        for (let seg = 0; seg < 4; seg++) {
+          px += (Math.random() - 0.5) * 60;
+          py += (Math.random() - 0.5) * 60;
+          ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+    } else if (camoType === 'hazmat') {
+      // High-visibility hazard diagonal stripes
+      ctx.strokeStyle = hex2;
+      ctx.lineWidth = 20;
+      for (let d = -256; d < 512; d += 44) {
+        ctx.beginPath();
+        ctx.moveTo(d, 0);
+        ctx.lineTo(d + 256, 256);
+        ctx.stroke();
+      }
+    } else {
+      // Standard tactical blotch camouflage (Woodland, Arctic, Spec-Ops, Emerald, Void)
+      const colors = [hex2, hex3, hex1];
+      for (let i = 0; i < 70; i++) {
+        ctx.fillStyle = colors[i % colors.length];
+        const bx = Math.random() * 256;
+        const by = Math.random() * 256;
+        const bw = 18 + Math.random() * 32;
+        const bh = 12 + Math.random() * 24;
+        ctx.beginPath();
+        ctx.ellipse(bx, by, bw / 2, bh / 2, Math.random() * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 2);
+    this.cache[key] = tex;
+    return tex;
+  }
+
+  /**
+   * Generates weapon skin pattern textures (Damascus swirls, Magma glow, Carbon weave, Glitch matrix)
+   */
+  public static createWeaponPatternTexture(skinId: string, pattern: string, pCol: number, sCol: number, aCol: number): THREE.CanvasTexture {
+    const key = `wp_pattern_${skinId}_${pattern}`;
+    if (this.cache[key]) return this.cache[key];
+
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext('2d')!;
+
+    const hexP = '#' + pCol.toString(16).padStart(6, '0');
+    const hexS = '#' + sCol.toString(16).padStart(6, '0');
+    const hexA = '#' + aCol.toString(16).padStart(6, '0');
+
+    ctx.fillStyle = hexP;
+    ctx.fillRect(0, 0, 512, 512);
+
+    if (pattern === 'damascus') {
+      ctx.strokeStyle = hexS;
+      ctx.lineWidth = 4;
+      for (let y = 0; y < 512; y += 14) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        for (let x = 0; x <= 512; x += 16) {
+          const dy = Math.sin(x * 0.05 + y * 0.08) * 8 + Math.cos(x * 0.02) * 4;
+          ctx.lineTo(x, y + dy);
+        }
+        ctx.stroke();
+      }
+    } else if (pattern === 'magma') {
+      ctx.strokeStyle = hexS;
+      ctx.lineWidth = 6;
+      for (let i = 0; i < 24; i++) {
+        ctx.beginPath();
+        let px = Math.random() * 512;
+        let py = Math.random() * 512;
+        ctx.moveTo(px, py);
+        for (let j = 0; j < 5; j++) {
+          px += (Math.random() - 0.5) * 80;
+          py += (Math.random() - 0.5) * 80;
+          ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+      ctx.strokeStyle = hexA;
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 15; i++) {
+        ctx.strokeRect(Math.random() * 500, Math.random() * 500, 4, 4);
+      }
+    } else if (pattern === 'matrix') {
+      ctx.fillStyle = hexS;
+      ctx.font = '14px monospace';
+      for (let col = 0; col < 512; col += 20) {
+        for (let row = 0; row < 512; row += 18) {
+          if (Math.random() > 0.45) {
+            const char = Math.random() > 0.5 ? '1' : '0';
+            ctx.fillText(char, col, row);
+          }
+        }
+      }
+    } else if (pattern === 'fade') {
+      const grad = ctx.createLinearGradient(0, 0, 512, 512);
+      grad.addColorStop(0, hexP);
+      grad.addColorStop(0.5, hexS);
+      grad.addColorStop(1, hexA);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 512, 512);
+    } else if (pattern === 'carbon') {
+      ctx.fillStyle = hexS;
+      for (let y = 0; y < 512; y += 8) {
+        for (let x = (y % 16 === 0 ? 0 : 8); x < 512; x += 16) {
+          ctx.fillRect(x, y, 7, 7);
+        }
+      }
+    } else if (pattern === 'ice') {
+      // Crystalline frost fractals
+      ctx.strokeStyle = hexS;
+      ctx.lineWidth = 3;
+      for (let i = 0; i < 35; i++) {
+        const cx = Math.random() * 512;
+        const cy = Math.random() * 512;
+        for (let a = 0; a < 6; a++) {
+          const ang = (a * Math.PI) / 3;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(ang) * 45, cy + Math.sin(ang) * 45);
+          ctx.stroke();
+        }
+      }
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(1.5, 1.5);
+    this.cache[key] = tex;
+    return tex;
+  }
+
+  /**
+   * Heavy Tactical Reinforced Steel Wall Texture with cross-bracing and anchor bolts
+   */
+  public static createReinforcedWallTexture(repeatX = 2, repeatY = 2): THREE.CanvasTexture {
+    const key = `reinforced_wall_${repeatX}_${repeatY}`;
+    if (this.cache[key]) return this.cache[key];
+
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext('2d')!;
+
+    // Dark ballistic steel backing
+    ctx.fillStyle = '#1e252b';
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Corrugated heavy steel armor plating
+    for (let x = 0; x < 512; x += 64) {
+      const grad = ctx.createLinearGradient(x, 0, x + 64, 0);
+      grad.addColorStop(0, '#2d3748');
+      grad.addColorStop(0.5, '#4a5568');
+      grad.addColorStop(1, '#1a202c');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x + 2, 8, 60, 496);
+    }
+
+    // Heavy X-cross structural steel bracing
+    ctx.strokeStyle = '#718096';
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.moveTo(16, 16);
+    ctx.lineTo(496, 496);
+    ctx.moveTo(496, 16);
+    ctx.lineTo(16, 496);
+    ctx.stroke();
+
+    // Steel anchor bolts & red warning locking pins
+    for (let by = 32; by <= 480; by += 64) {
+      for (let bx of [32, 256, 480]) {
+        // Metallic flange
+        ctx.fillStyle = '#1a202c';
+        ctx.beginPath();
+        ctx.arc(bx, by, 10, 0, Math.PI * 2);
+        ctx.fill();
+        // Red locking head
+        ctx.fillStyle = '#e53e3e';
+        ctx.beginPath();
+        ctx.arc(bx, by, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Yellow hazard warning stripe border at top and bottom
+    const addHazardBand = (y: number) => {
+      ctx.fillStyle = '#ecc94b';
+      ctx.fillRect(0, y, 512, 20);
+      ctx.fillStyle = '#1a202c';
+      for (let s = -20; s < 532; s += 30) {
+        ctx.beginPath();
+        ctx.moveTo(s, y);
+        ctx.lineTo(s + 15, y);
+        ctx.lineTo(s + 30, y + 20);
+        ctx.lineTo(s + 15, y + 20);
+        ctx.closePath();
+        ctx.fill();
+      }
+    };
+    addHazardBand(0);
+    addHazardBand(492);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(repeatX, repeatY);
+    this.cache[key] = tex;
+    return tex;
+  }
+
+  /**
+   * Destructible Interior Soft Wall drywall with panel seams and stud markers
+   */
+  public static createSoftWallDrywallTexture(hexColor = 0xece5d8, repeatX = 2, repeatY = 2): THREE.CanvasTexture {
+    const key = `soft_drywall_${hexColor}_${repeatX}_${repeatY}`;
+    if (this.cache[key]) return this.cache[key];
+
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext('2d')!;
+
+    const hexStr = '#' + hexColor.toString(16).padStart(6, '0');
+    ctx.fillStyle = hexStr;
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Subtle drywall plaster noise
+    for (let i = 0; i < 1200; i++) {
+      ctx.fillStyle = Math.random() > 0.5 ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.05)';
+      ctx.fillRect(Math.random() * 512, Math.random() * 512, 3, 3);
+    }
+
+    // Vertical drywall panel seams
+    for (let px = 128; px < 512; px += 128) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, 512);
+      ctx.stroke();
+
+      // Subtle drywall screw dimples
+      for (let sy = 32; sy < 512; sy += 64) {
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.beginPath();
+        ctx.arc(px, sy, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(repeatX, repeatY);
+    this.cache[key] = tex;
+    return tex;
+  }
+
+  /**
    * Framed Canvas Oil Painting for house walls
    */
   public static createFramedArt(artType = 0): THREE.CanvasTexture {

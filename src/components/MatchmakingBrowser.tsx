@@ -13,25 +13,36 @@ export interface LobbyInfo {
   scoreDef: number;
   hostName: string;
   mapName: string;
+  mapKey?: string;
+  difficulty?: 'Easy' | 'Normal' | 'Hard';
+  gameMode?: 'quick' | 'ranked';
   ping: number;
 }
 
 interface MatchmakingBrowserProps {
   selectedRoomId: string;
-  onSelectRoom: (roomId: string) => void;
+  onSelectRoom: (roomId: string, lobbyInfo?: LobbyInfo) => void;
   playerName: string;
   setPlayerName: (name: string) => void;
+  currentMode: 'quick' | 'ranked';
+  onModeChanged?: (mode: 'quick' | 'ranked') => void;
 }
 
 export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
   selectedRoomId,
   onSelectRoom,
   playerName,
-  setPlayerName
+  setPlayerName,
+  currentMode,
+  onModeChanged
 }) => {
   const [lobbies, setLobbies] = useState<LobbyInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [newLobbyName, setNewLobbyName] = useState<string>('');
+  const [newLobbyMap, setNewLobbyMap] = useState<string>('suburban_house');
+  const [newLobbyDiff, setNewLobbyDiff] = useState<'Easy' | 'Normal' | 'Hard'>('Normal');
+  const [newLobbyMode, setNewLobbyMode] = useState<'quick' | 'ranked'>('quick');
+  const [showCreateOptions, setShowCreateOptions] = useState<boolean>(false);
   const [showGuide, setShowGuide] = useState<boolean>(false);
   const [serverOnline, setServerOnline] = useState<boolean>(true);
 
@@ -69,11 +80,34 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
       const res = await fetch('/api/lobbies/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId: formatted })
+        body: JSON.stringify({
+          roomId: formatted,
+          mapKey: newLobbyMap,
+          difficulty: newLobbyDiff,
+          gameMode: newLobbyMode
+        })
       });
       if (res.ok) {
-        onSelectRoom(formatted);
+        const data = await res.json();
+        onSelectRoom(formatted, {
+          roomId: formatted,
+          playerCount: 1,
+          maxPlayers: 10,
+          atkCount: 1,
+          defCount: 0,
+          phase: 'prep',
+          round: 1,
+          scoreAtk: 0,
+          scoreDef: 0,
+          hostName: playerName,
+          mapName: newLobbyMap === 'warehouse' ? 'Warehouse District' : (newLobbyMap === 'office_tower' ? 'Highrise Office Tower' : 'Suburban Villa'),
+          mapKey: newLobbyMap,
+          difficulty: newLobbyDiff,
+          gameMode: newLobbyMode,
+          ping: 12
+        });
         setNewLobbyName('');
+        setShowCreateOptions(false);
         fetchLobbies();
       }
     } catch (err) {
@@ -83,11 +117,12 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
 
   const handleQuickMatch = () => {
     if (lobbies.length > 0) {
-      // Find room with most players that isn't full
-      const sorted = [...lobbies].sort((a, b) => b.playerCount - a.playerCount);
+      const matchesMode = lobbies.filter(l => (l.gameMode || 'quick') === currentMode);
+      const candidates = matchesMode.length > 0 ? matchesMode : lobbies;
+      const sorted = [...candidates].sort((a, b) => b.playerCount - a.playerCount);
       const available = sorted.find(l => l.playerCount < l.maxPlayers);
       if (available) {
-        onSelectRoom(available.roomId);
+        onSelectRoom(available.roomId, available);
         return;
       }
     }
@@ -206,10 +241,13 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
           ) : (
             lobbies.map((lobby) => {
               const isCurrent = selectedRoomId === lobby.roomId;
+              const isRanked = lobby.gameMode === 'ranked';
+              const diffColor = lobby.difficulty === 'Hard' ? 'text-red-400 border-red-500/40 bg-red-950/30' : (lobby.difficulty === 'Easy' ? 'text-emerald-400 border-emerald-500/40 bg-emerald-950/30' : 'text-amber-400 border-amber-500/40 bg-amber-950/30');
+
               return (
                 <div
                   key={lobby.roomId}
-                  onClick={() => onSelectRoom(lobby.roomId)}
+                  onClick={() => onSelectRoom(lobby.roomId, lobby)}
                   className={`flex flex-wrap items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
                     isCurrent
                       ? 'bg-[#152e42] border-[#38bdf8] ring-1 ring-[#38bdf8]/50 shadow-md'
@@ -218,9 +256,21 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
                 >
                   <div className="flex items-center gap-3">
                     <div className="flex flex-col">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-mono font-bold text-sm text-[#7fd6ff]">
                           {lobby.roomId.toUpperCase()}
+                        </span>
+                        {isRanked ? (
+                          <span className="px-1.5 py-0.2 bg-purple-950/60 text-purple-300 border border-purple-500/50 text-[9px] font-mono font-bold rounded">
+                            🏆 RANKED
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.2 bg-blue-950/60 text-blue-300 border border-blue-500/50 text-[9px] font-mono font-bold rounded">
+                            ⚡ QUICK MATCH
+                          </span>
+                        )}
+                        <span className={`px-1.5 py-0.2 border text-[9px] font-mono font-bold rounded ${diffColor}`}>
+                          BOTS: {lobby.difficulty?.toUpperCase() || 'NORMAL'}
                         </span>
                         {isCurrent && (
                           <span className="px-1.5 py-0.2 bg-[#38bdf8]/20 text-[#38bdf8] border border-[#38bdf8]/50 text-[9px] font-mono font-bold rounded">
@@ -229,12 +279,12 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
                         )}
                       </div>
                       <span className="text-[10px] text-gray-400 font-mono">
-                        Host: {lobby.hostName} · Map: {lobby.mapName}
+                        Host: {lobby.hostName} · Map: <b className="text-white">{lobby.mapName}</b>
                       </span>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4 text-xs font-mono">
+                  <div className="flex items-center gap-3 text-xs font-mono">
                     <div className="flex items-center gap-1 text-gray-300">
                       <Users className="w-3.5 h-3.5 text-[#38bdf8]" />
                       <span className="font-bold text-white">{lobby.playerCount}</span>
@@ -254,7 +304,7 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        onSelectRoom(lobby.roomId);
+                        onSelectRoom(lobby.roomId, lobby);
                       }}
                       className={`px-3 py-1 font-mono text-xs font-extrabold rounded border transition-all cursor-pointer ${
                         isCurrent
@@ -273,25 +323,81 @@ export const MatchmakingBrowser: React.FC<MatchmakingBrowserProps> = ({
       </div>
 
       {/* Create Custom Room Form */}
-      <form onSubmit={handleCreateLobby} className="flex items-center gap-2 bg-[#08121c] p-2 rounded-lg border border-[#23455a]">
-        <label className="text-xs text-gray-300 font-mono font-bold shrink-0 flex items-center gap-1">
-          <Plus className="w-3.5 h-3.5 text-[#38bdf8]" />
-          CREATE LOBBY:
-        </label>
-        <input
-          type="text"
-          placeholder="e.g. ranked-squad-1"
-          value={newLobbyName}
-          onChange={(e) => setNewLobbyName(e.target.value)}
-          className="bg-[#0e1c2a] text-[#7fd6ff] font-mono text-xs font-bold border border-[#23455a] rounded px-2.5 py-1 flex-1 outline-none focus:border-[#38bdf8]"
-        />
-        <button
-          type="submit"
-          className="px-3 py-1 bg-[#0284c7] hover:bg-[#0369a1] text-white font-mono text-xs font-bold rounded border border-[#38bdf8]/40 cursor-pointer transition-all shrink-0"
-        >
-          + CREATE & JOIN
-        </button>
-      </form>
+      <div className="flex flex-col gap-2 bg-[#08121c] p-2.5 rounded-lg border border-[#23455a]">
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-gray-300 font-mono font-bold shrink-0 flex items-center gap-1">
+            <Plus className="w-3.5 h-3.5 text-[#38bdf8]" />
+            CREATE CUSTOM LOBBY (HOST SETS MAP & BOTS):
+          </label>
+          <button
+            type="button"
+            onClick={() => setShowCreateOptions(!showCreateOptions)}
+            className="text-[10px] font-mono text-[#38bdf8] hover:underline cursor-pointer"
+          >
+            {showCreateOptions ? 'Hide Settings ▲' : 'Configure Map & Difficulty ▼'}
+          </button>
+        </div>
+
+        <form onSubmit={handleCreateLobby} className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              placeholder="e.g. ranked-squad-1"
+              value={newLobbyName}
+              onChange={(e) => setNewLobbyName(e.target.value)}
+              className="bg-[#0e1c2a] text-[#7fd6ff] font-mono text-xs font-bold border border-[#23455a] rounded px-2.5 py-1.5 flex-1 outline-none focus:border-[#38bdf8]"
+            />
+            <button
+              type="submit"
+              className="px-4 py-1.5 bg-[#0284c7] hover:bg-[#0369a1] text-white font-mono text-xs font-bold rounded border border-[#38bdf8]/40 cursor-pointer transition-all shrink-0"
+            >
+              + CREATE & JOIN
+            </button>
+          </div>
+
+          {showCreateOptions && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-2 bg-[#0d1824] rounded border border-[#1b3447] text-xs font-mono">
+              <div>
+                <label className="text-[10px] text-gray-400 block mb-1">MAP SELECTION:</label>
+                <select
+                  value={newLobbyMap}
+                  onChange={(e) => setNewLobbyMap(e.target.value)}
+                  className="w-full bg-[#08121c] border border-[#23455a] text-[#7fd6ff] rounded p-1 text-xs"
+                >
+                  <option value="suburban_house">Suburban Villa (2F House)</option>
+                  <option value="warehouse">Warehouse District</option>
+                  <option value="office_tower">Highrise Office Tower</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] text-gray-400 block mb-1">BOT DIFFICULTY:</label>
+                <select
+                  value={newLobbyDiff}
+                  onChange={(e) => setNewLobbyDiff(e.target.value as any)}
+                  className="w-full bg-[#08121c] border border-[#23455a] text-[#7fd6ff] rounded p-1 text-xs"
+                >
+                  <option value="Easy">Easy (Recruits)</option>
+                  <option value="Normal">Normal (Tactical Squad)</option>
+                  <option value="Hard">Hard (Elite Delta Operators)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] text-gray-400 block mb-1">GAME MODE:</label>
+                <select
+                  value={newLobbyMode}
+                  onChange={(e) => setNewLobbyMode(e.target.value as any)}
+                  className="w-full bg-[#08121c] border border-[#23455a] text-[#7fd6ff] rounded p-1 text-xs"
+                >
+                  <option value="quick">Quick Match (Casual Renown)</option>
+                  <option value="ranked">Ranked Competitive (Rank Points + High Renown)</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </form>
+      </div>
     </div>
   );
 };

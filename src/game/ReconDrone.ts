@@ -234,9 +234,10 @@ export class ReconDrone {
 
     // --- ACCELERATION & DRIVING ---
     const forwardVec = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    const maxSpeed = 5.2; // m/s
-    const reverseSpeed = 2.8; // m/s
-    const accel = 20.0;
+    const isSprinting = !!(keys['ShiftLeft'] || keys['ShiftRight']);
+    const maxSpeed = isSprinting ? 9.8 : 5.6; // Sprint turbo mode (9.8 m/s) vs standard (5.6 m/s)
+    const reverseSpeed = isSprinting ? 4.2 : 2.8; // m/s
+    const accel = isSprinting ? 32.0 : 20.0;
     const friction = 14.0;
 
     let targetSpeed = 0;
@@ -262,13 +263,13 @@ export class ReconDrone {
       }
     }
 
-    // --- PNEUMATIC PISTON JUMP ---
+    // --- HIGH-POWER PNEUMATIC PISTON JUMP ---
     if ((keys['Space'] || keys['KeyX']) && this.isGrounded && this.jumpCooldown <= 0) {
-      this.vel.y = 5.0; // Leaps approx 0.7m (bumped up from 4.2 / ~0.5m)
+      this.vel.y = 5.8; // Tuned realistic pneumatic jump (~0.95m height) to hop onto ledges, vents & low barricades
       this.isGrounded = false;
-      this.jumpCooldown = 1.6;
-      sfxFn?.(380, 0.08, 'sawtooth');
-      sfxFn?.(720, 0.06, 'triangle');
+      this.jumpCooldown = 1.2;
+      sfxFn?.(440, 0.09, 'sawtooth');
+      sfxFn?.(820, 0.07, 'triangle');
     }
 
     // --- GRAVITY & STAIR/FLOOR CLAMPING ---

@@ -585,6 +585,22 @@ class SoundEngine {
     osc.stop(now + 0.28);
     this.playBarricadeHit();
   }
+
+  public secure() {
+    this.playRadioPing(false);
+  }
+
+  public roundWin() {
+    this.playRadioPing(false);
+  }
+
+  public roundLoss() {
+    this.playRadioPing(true);
+  }
+
+  public woodSnap() {
+    this.playBarricadeHit();
+  }
 }
 
 export const sound = new SoundEngine();

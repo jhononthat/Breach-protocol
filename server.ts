@@ -38,6 +38,10 @@ interface MatchRoomState {
   winner: 'atk' | 'def' | null;
   players: Record<string, NetworkPlayer>;
   breachedBarricades: string[];
+  mapKey: string;
+  difficulty: 'Easy' | 'Normal' | 'Hard';
+  gameMode: 'quick' | 'ranked';
+  hostId?: string;
 }
 
 const app = express();
@@ -53,8 +57,15 @@ app.use(express.json());
 const rooms: Record<string, MatchRoomState> = {};
 const clientRooms = new Map<WebSocket, { roomId: string; playerId: string }>();
 
-// Seed default active matchmaking lobbies
-['default', 'casual-squad', 'ranked-alpha', 'tactical-house'].forEach(id => {
+// Seed default active matchmaking lobbies with predetermined maps & difficulty
+const INITIAL_LOBBY_CONFIGS: Record<string, { mapKey: string; difficulty: 'Easy' | 'Normal' | 'Hard'; gameMode: 'quick' | 'ranked' }> = {
+  'default': { mapKey: 'suburban_house', difficulty: 'Normal', gameMode: 'quick' },
+  'casual-squad': { mapKey: 'warehouse', difficulty: 'Easy', gameMode: 'quick' },
+  'ranked-alpha': { mapKey: 'office_tower', difficulty: 'Hard', gameMode: 'ranked' },
+  'tactical-house': { mapKey: 'suburban_house', difficulty: 'Hard', gameMode: 'ranked' },
+};
+
+Object.entries(INITIAL_LOBBY_CONFIGS).forEach(([id, cfg]) => {
   rooms[id] = {
     roomId: id,
     phase: 'prep',
@@ -67,11 +78,19 @@ const clientRooms = new Map<WebSocket, { roomId: string; playerId: string }>();
     defuserPos: null,
     winner: null,
     players: {},
-    breachedBarricades: []
+    breachedBarricades: [],
+    mapKey: cfg.mapKey,
+    difficulty: cfg.difficulty,
+    gameMode: cfg.gameMode
   };
 });
 
-function getOrCreateRoom(roomId: string = 'default'): MatchRoomState {
+function getOrCreateRoom(
+  roomId: string = 'default',
+  mapKey: string = 'suburban_house',
+  difficulty: 'Easy' | 'Normal' | 'Hard' = 'Normal',
+  gameMode: 'quick' | 'ranked' = 'quick'
+): MatchRoomState {
   if (!rooms[roomId]) {
     rooms[roomId] = {
       roomId,
@@ -85,7 +104,10 @@ function getOrCreateRoom(roomId: string = 'default'): MatchRoomState {
       defuserPos: null,
       winner: null,
       players: {},
-      breachedBarricades: []
+      breachedBarricades: [],
+      mapKey,
+      difficulty,
+      gameMode
     };
   }
   return rooms[roomId];
@@ -98,6 +120,12 @@ app.get('/api/health', (req, res) => {
 
 // Returns all active available lobbies for online matchmaking
 app.get('/api/lobbies', (req, res) => {
+  const mapDisplayNames: Record<string, string> = {
+    suburban_house: 'Suburban Villa (2F House)',
+    warehouse: 'Warehouse District',
+    office_tower: 'Highrise Office Tower'
+  };
+
   const lobbyList = Object.values(rooms).map(room => {
     const playersList = Object.values(room.players);
     const host = playersList.find(p => p.isHost)?.name || playersList[0]?.name || 'Automated Server';
@@ -115,7 +143,10 @@ app.get('/api/lobbies', (req, res) => {
       scoreAtk: room.scoreAtk,
       scoreDef: room.scoreDef,
       hostName: host,
-      mapName: 'Suburban House',
+      mapName: mapDisplayNames[room.mapKey] || room.mapKey,
+      mapKey: room.mapKey,
+      difficulty: room.difficulty,
+      gameMode: room.gameMode,
       ping: Math.floor(12 + Math.random() * 15)
     };
   });
@@ -124,13 +155,26 @@ app.get('/api/lobbies', (req, res) => {
 });
 
 app.post('/api/lobbies/create', (req, res) => {
-  const { roomId } = req.body;
+  const { roomId, mapKey, difficulty, gameMode } = req.body;
   if (!roomId || typeof roomId !== 'string') {
     return res.status(400).json({ error: 'Invalid room name' });
   }
   const cleanRoomId = roomId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  const room = getOrCreateRoom(cleanRoomId);
-  res.json({ success: true, room: { roomId: room.roomId, playerCount: Object.keys(room.players).length } });
+  const validMap = ['suburban_house', 'warehouse', 'office_tower'].includes(mapKey) ? mapKey : 'suburban_house';
+  const validDiff = ['Easy', 'Normal', 'Hard'].includes(difficulty) ? difficulty : 'Normal';
+  const validMode = gameMode === 'ranked' ? 'ranked' : 'quick';
+
+  const room = getOrCreateRoom(cleanRoomId, validMap, validDiff, validMode);
+  res.json({
+    success: true,
+    room: {
+      roomId: room.roomId,
+      mapKey: room.mapKey,
+      difficulty: room.difficulty,
+      gameMode: room.gameMode,
+      playerCount: Object.keys(room.players).length
+    }
+  });
 });
 
 app.get('/api/lan/info', (req, res) => {
@@ -228,8 +272,12 @@ wss.on('connection', (ws: WebSocket) => {
               defuserPlanted: room.defuserPlanted,
               defuserTimer: room.defuserTimer,
               defuserPos: room.defuserPos,
-              breachedBarricades: room.breachedBarricades
+              breachedBarricades: room.breachedBarricades,
+              mapKey: room.mapKey,
+              difficulty: room.difficulty,
+              gameMode: room.gameMode
             },
+            isHost: isFirstPlayer,
             players: room.players
           }));
 
@@ -274,6 +322,22 @@ wss.on('connection', (ws: WebSocket) => {
                 players: room.players
               });
             }
+          }
+          break;
+        }
+
+        case 'update_room_settings': {
+          const p = room.players[playerId];
+          if (p && p.isHost) {
+            if (msg.mapKey) room.mapKey = msg.mapKey;
+            if (msg.difficulty) room.difficulty = msg.difficulty;
+            if (msg.gameMode) room.gameMode = msg.gameMode;
+            broadcastToRoom(currentRoomId, {
+              type: 'room_settings_updated',
+              mapKey: room.mapKey,
+              difficulty: room.difficulty,
+              gameMode: room.gameMode
+            });
           }
           break;
         }

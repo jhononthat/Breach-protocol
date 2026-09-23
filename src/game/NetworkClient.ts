@@ -34,6 +34,7 @@ export class NetworkClient {
   public connected: boolean = false;
   public isMultiplayerActive: boolean = false;
   public playerId: string = '';
+  public playerName: string = 'Operator';
   public roomId: string = 'default';
   public remotePlayers: Map<string, RemotePlayer> = new Map();
   public pingMs: number = 0;
@@ -53,6 +54,7 @@ export class NetworkClient {
   public onChatMessage?: (senderName: string, text: string, side: 'atk' | 'def') => void;
   public onReadyStatusChanged?: (players: Record<string, any>, allReady: boolean) => void;
   public onAllPlayersReady?: () => void;
+  public onRoomConfig?: (config: { mapKey: string; difficulty: string; gameMode: string; isHost: boolean }) => void;
 
   constructor() {
     this.playerId = `op_${Math.random().toString(36).substring(2, 8)}`;
@@ -69,6 +71,7 @@ export class NetworkClient {
     }
 
     this.roomId = customRoomId;
+    this.playerName = playerName || 'Operator';
     // Allow pointing at an externally-hosted multiplayer server (needed on Vercel, since it can't
     // run the persistent WebSocket server itself). Falls back to same-origin /ws for local dev or
     // any host — like Railway/Render/Fly — that serves both the site and the socket together.
@@ -199,6 +202,24 @@ export class NetworkClient {
       case 'init': {
         this.playerId = msg.playerId;
         this.syncPlayerList(msg.players);
+        if (msg.roomState) {
+          this.onRoomConfig?.({
+            mapKey: msg.roomState.mapKey || 'suburban_house',
+            difficulty: msg.roomState.difficulty || 'Normal',
+            gameMode: msg.roomState.gameMode || 'quick',
+            isHost: !!msg.isHost
+          });
+        }
+        break;
+      }
+
+      case 'room_settings_updated': {
+        this.onRoomConfig?.({
+          mapKey: msg.mapKey || 'suburban_house',
+          difficulty: msg.difficulty || 'Normal',
+          gameMode: msg.gameMode || 'quick',
+          isHost: false
+        });
         break;
       }
 
@@ -301,6 +322,17 @@ export class NetworkClient {
           const b = this.engine.barricades.find((barr: any) => barr.id === msg.barricadeId);
           if (b && !b.isBreached) {
             this.engine.breachBarricade?.(b, false);
+          }
+        }
+        break;
+      }
+
+      case 'wall_reinforced': {
+        if (msg.byPlayerId === this.playerId) return;
+        if (this.engine?.barricades) {
+          const b = this.engine.barricades.find((barr: any) => barr.id === msg.barricadeId);
+          if (b && !b.isReinforced) {
+            this.engine.reinforceSoftWall?.(b, false, msg.byPlayerName || 'Teammate');
           }
         }
         break;
@@ -623,6 +655,37 @@ export class NetworkClient {
       opId,
       opName,
       side
+    });
+  }
+
+  public updateRoomSettings(mapKey: string, difficulty: string, gameMode: string) {
+    if (!this.connected) return;
+    this.send({
+      type: 'update_room_settings',
+      roomId: this.roomId,
+      mapKey,
+      difficulty,
+      gameMode
+    });
+  }
+
+  public notifyTeamSwitch(newSide: 'atk' | 'def') {
+    if (!this.connected) return;
+    this.send({
+      type: 'team_switch',
+      roomId: this.roomId,
+      side: newSide
+    });
+  }
+
+  public notifyWallReinforced(barricadeId: string) {
+    if (!this.connected) return;
+    this.send({
+      type: 'wall_reinforced',
+      roomId: this.roomId,
+      barricadeId,
+      byPlayerId: this.playerId,
+      byPlayerName: this.playerName
     });
   }
 

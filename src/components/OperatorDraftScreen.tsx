@@ -25,6 +25,7 @@ interface OperatorDraftScreenProps {
   onCancelReady: () => void;
   onBackToMenu: () => void;
   onMatchStart: () => void;
+  onRandomizeTeam?: () => void;
 }
 
 export const OperatorDraftScreen: React.FC<OperatorDraftScreenProps> = ({
@@ -40,7 +41,8 @@ export const OperatorDraftScreen: React.FC<OperatorDraftScreenProps> = ({
   onLockInReady,
   onCancelReady,
   onBackToMenu,
-  onMatchStart
+  onMatchStart,
+  onRandomizeTeam
 }) => {
   const [opSideFilter, setOpSideFilter] = useState<'all' | 'atk' | 'def'>(playerSide);
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -97,9 +99,21 @@ export const OperatorDraftScreen: React.FC<OperatorDraftScreenProps> = ({
                 TACTICAL OPERATOR DRAFT & LOADOUT
               </h1>
             </div>
-            <span className="text-xs text-gray-400 font-mono">
-              MATCH ROOM: <b className="text-[#ffe27a]">{roomId.toUpperCase()}</b> · ASSIGNED TEAM: <b className={playerSide === 'atk' ? 'text-[#38bdf8]' : 'text-[#fbbf24]'}>{playerSide === 'atk' ? 'ATTACK (BLUE)' : 'DEFENSE (ORANGE)'}</b>
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400 font-mono">
+                MATCH ROOM: <b className="text-[#ffe27a]">{roomId.toUpperCase()}</b> · ASSIGNED TEAM: <b className={playerSide === 'atk' ? 'text-[#38bdf8]' : 'text-[#fbbf24]'}>{playerSide === 'atk' ? 'ATTACK (BLUE)' : 'DEFENSE (ORANGE)'}</b>
+              </span>
+              {onRandomizeTeam && !isLocalReady && (
+                <button
+                  onClick={onRandomizeTeam}
+                  className="px-2 py-0.5 bg-[#142e44] hover:bg-[#1f4362] text-[#7fd6ff] hover:text-white border border-[#38bdf8]/40 rounded text-[11px] font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
+                  title="Randomize / Swap Assigned Team"
+                >
+                  <span>🎲</span>
+                  <span>RANDOMIZE TEAM</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
